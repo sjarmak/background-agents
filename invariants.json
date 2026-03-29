@@ -1,0 +1,64 @@
+{
+  "invariants": [
+    {
+      "id": "auth-init-required",
+      "description": "Every service importing auth-lib MUST call auth.init() in its entrypoint",
+      "severity": "critical",
+      "search": {
+        "pattern": "import.*auth-lib|require.*auth-lib|from auth_lib",
+        "language": null
+      },
+      "assertion": {
+        "type": "must_contain",
+        "pattern": "auth\\.init\\(",
+        "scope": "repo"
+      },
+      "message": "Repository imports auth-lib but never calls auth.init() — this causes silent auth bypass"
+    },
+    {
+      "id": "no-dual-db-clients",
+      "description": "No repo should import both old-db-client and new-db-client",
+      "severity": "high",
+      "search": {
+        "pattern": "old-db-client|old_db_client",
+        "language": null
+      },
+      "assertion": {
+        "type": "must_not_contain",
+        "pattern": "new-db-client|new_db_client",
+        "scope": "repo"
+      },
+      "message": "Repository uses both old-db-client and new-db-client — pick one to avoid connection pool exhaustion"
+    },
+    {
+      "id": "no-deprecated-logger",
+      "description": "No repo should use the deprecated console-logger package",
+      "severity": "medium",
+      "search": {
+        "pattern": "console-logger|from console_logger",
+        "language": null
+      },
+      "assertion": {
+        "type": "must_not_exist",
+        "pattern": null,
+        "scope": "repo"
+      },
+      "message": "Repository uses deprecated console-logger — migrate to structured-logger"
+    },
+    {
+      "id": "grpc-timeout-required",
+      "description": "Every gRPC client call must specify a timeout/deadline",
+      "severity": "high",
+      "search": {
+        "pattern": "grpc\\.Dial|grpc\\.NewClient|grpcClient\\.",
+        "language": "go"
+      },
+      "assertion": {
+        "type": "must_contain",
+        "pattern": "WithTimeout|WithDeadline|context\\.WithTimeout",
+        "scope": "file"
+      },
+      "message": "gRPC client call without timeout — can cause cascading failures"
+    }
+  ]
+}

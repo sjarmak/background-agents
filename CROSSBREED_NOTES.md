@@ -1,133 +1,122 @@
-# Crossbreed Notes: A-Dominant Matrix Isolation + Rich Slack
+# Crossbreed Notes: C-Dominant + Slim + Isolated + CLAUDE.md
 
 ## Strategy
 
-A-dominant hybrid: Parent A's zero-code GitHub Action + CLAUDE.md approach is the backbone.
-Parent B's per-invariant isolation is achieved via GitHub Actions **matrix strategy** instead of bash orchestrator.
-Parent B's rich Slack output is kept as the ONE allowed script.
-Parent C's Zod validation concept is realized as a JSON Schema file.
+Start from Parent C's TypeScript module architecture, graft Parent B's
+per-invariant isolation and JSON report contract, and Parent A's CLAUDE.md
+agent instruction layer. Remove server mode (Slack Bolt bot) entirely.
 
 ## What Was Taken From Each Parent
 
-### Parent A (Pure GitHub Action) — Dominant
+### Parent C (agent-sdk-service) — Dominant
 
-| Artifact                         | Status      | Notes                                                                                                |
-| -------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------- |
-| `CLAUDE.md` agent instructions   | Enhanced    | Added per-invariant focus ("you are verifying a single invariant") and Output Contract section       |
-| `.github/invariants.yml`         | Taken as-is | Declarative invariant config with A's concise assertion keys (`must_contain:` vs `type: + pattern:`) |
-| `.github/claude-mcp-config.json` | Taken as-is | MCP server configuration for Sourcegraph                                                             |
-| Zero-code philosophy             | Preserved   | No TypeScript, no custom orchestrator — YAML + CLAUDE.md + one bash script                           |
-| `claude -p --bare` invocation    | Preserved   | Direct CLI call with MCP config and tool allowlist                                                   |
+| Component                   | Action      | Rationale                                                            |
+| --------------------------- | ----------- | -------------------------------------------------------------------- |
+| `src/sourcegraph-client.ts` | Kept ~as-is | Reusable module for future agents; well-structured Agent SDK wrapper |
+| `src/invariant-engine.ts`   | Modified    | Good Zod schema + assertion logic, but needed isolation pattern      |
+| `src/ci-trigger.ts`         | Simplified  | Removed Slack Bolt dependency, uses new report types from engine     |
+| `src/index.ts`              | Simplified  | Removed server mode, cleaner type usage                              |
+| `package.json`              | Slimmed     | Removed `@slack/bolt`, `serve` script, Dockerfile                    |
+| `tsconfig.json`             | Kept as-is  | Standard Node+ESM config                                             |
+| `invariants.json`           | Kept as-is  | Zod-validated config format                                          |
 
-### Parent B (CLI + Hooks) — Grafted
+### Parent B (cli-hooks) — Isolation Pattern + Output Scripts
 
-| Artifact                         | Status            | Notes                                                                                                                                                            |
-| -------------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Per-invariant isolation          | **Reimplemented** | B used a bash for-loop; crossbreed uses GitHub Actions `matrix` strategy — each invariant is a separate **job** with its own runner, timeout, and error boundary |
-| `scripts/post-slack.sh`          | Enhanced          | Added `SLACK_CHANNEL` override, description lines in pass output, jq prerequisite check                                                                          |
-| JSON report contract             | Preserved         | `{timestamp, summary, results[]}` format is the integration spine between verify jobs and report job                                                             |
-| `scripts/post-github-comment.sh` | **Dropped**       | PR comment logic inlined in workflow report step — no need for a separate script                                                                                 |
-| `scripts/verify-invariants.sh`   | **Dropped**       | The matrix strategy IS the orchestrator — no bash loop needed                                                                                                    |
+| Component                        | Action                                     | Rationale                                                                                       |
+| -------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| Per-invariant isolation          | Grafted into `InvariantEngine.verifyAll()` | Each invariant gets its own try/catch — one failure doesn't block others                        |
+| JSON report contract             | Adopted as output format                   | `{summary: {total, passed, failed, errors}, results: [...]}` is consumable by B's shell scripts |
+| `scripts/post-slack.sh`          | Adapted                                    | Changed violation field access to match B's JSON contract (repo/file/line)                      |
+| `scripts/post-github-comment.sh` | Adapted                                    | Same field name alignment                                                                       |
+| Workflow: pipe stdout            | Adopted                                    | CLI mode outputs JSON to stdout, consumable by shell scripts                                    |
 
-### Parent C (Agent SDK Service) — Grafted
+### Parent A (pure-github-action) — CLAUDE.md
 
-| Artifact                           | Status        | Notes                                                                                                           |
-| ---------------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------- | ---------------- | -------------------------------------------- | ----------------------- |
-| Zod schema for config              | Reimplemented | As `.github/invariants.schema.json` (JSON Schema draft 2020-12) — validates same constraints without TypeScript |
-| Assertion type enum                | Absorbed      | `must_contain                                                                                                   | must_not_contain | must_not_exist`codified via`oneOf` in schema |
-| Severity enum                      | Absorbed      | `critical                                                                                                       | high             | medium                                       | low` codified in schema |
-| SourcegraphClient, SlackNotifier   | **Dropped**   | Over-engineered for this use case; bash + MCP are sufficient                                                    |
-| 3 operational modes                | **Dropped**   | CI-only via workflows; server mode deferred to future agent                                                     |
-| Dockerfile, package.json, tsconfig | **Dropped**   | Zero dependencies is a feature                                                                                  |
-
-## Key Innovation: Matrix as Orchestrator
-
-The central insight: GitHub Actions `matrix` strategy replaces B's bash orchestrator entirely.
-
-**Before (B):** `verify-invariants.sh` loops over invariants sequentially, calling `claude -p` once per invariant.
-
-**After (crossbreed):**
-
-1. `setup` job reads `invariants.yml`, emits `{"include": [{"id": "auth-init-required"}, ...]}` as matrix JSON
-2. `verify` job runs in parallel across all invariants — each gets its own runner, 10-minute timeout, and artifact upload
-3. `report` job downloads all artifacts, assembles the JSON report, posts to GitHub PR or Slack
-
-Benefits:
-
-- **True parallelism**: invariants verify concurrently across runners (B was sequential)
-- **Native isolation**: a crashed/hung invariant doesn't block others
-- **GitHub-native retry**: failed matrix jobs can be retried individually
-- **No custom code**: the "orchestrator" is YAML workflow syntax
+| Component   | Action                  | Rationale                                                                                                        |
+| ----------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE.md` | Adapted for SDK context | Changed invariant format docs from YAML to JSON, added output contract section, kept verification steps and tips |
 
 ## Integration Challenges
 
-1. **Matrix data passing**: GitHub Actions matrix requires a flat JSON array. Invariant objects have nested fields (search.pattern, assertion.must_contain). Solved by passing only `{"id": "..."}` in the matrix, then using `yq` in each job to extract the full invariant by ID.
+1. **Type system unification**: Parent C's `Violation` type had `invariantId`, `description`, `severity`, `repo`, `message`, `details` fields. Parent B's contract uses `repo`, `file`, `line`, `detail`. Created new types in the engine matching B's contract while preserving C's Zod validation.
 
-2. **Assertion key detection**: A's YAML uses assertion type as the key (`must_contain: "pattern"`) while B's script expected explicit `type` and `pattern` fields. Each verify job detects the key via `jq -e '.assertion.must_not_exist'` fallback chain.
+2. **stdout vs stderr**: Parent C logged progress to `console.log` (stdout). Parent B expected clean JSON on stdout. Changed all progress logging to `console.error` so stdout is reserved for the JSON report.
 
-3. **Report assembly from artifacts**: B's bash loop accumulated results in a variable. The matrix approach uploads per-invariant JSON as artifacts, then the report job downloads and merges them. Required inventing the `results/result-*/result.json` glob pattern.
+3. **Report shape**: Parent C's `VerificationSummary` had `totalInvariants`, `passed`, `failed`, `violations[]`, `durationMs`. Parent B's shape has `summary.{total, passed, failed, errors}` and per-result `violations[]`. Rewrote to match B's shape, which is more detailed (per-invariant results vs flat violation list).
 
-4. **PR comment without a script**: B had `post-github-comment.sh` (98 lines). Crossbreed inlines the markdown construction in the workflow using `jq -r '@base64'` iteration — denser but eliminates a file.
+4. **Slack output path**: Parent C used Slack Bolt SDK (full bot). Parent B used `curl` to webhook. Chose B's approach — simpler, stateless, runs in CI without a long-lived process.
 
-## New Connective Tissue
+## New Connective Tissue Invented
 
-1. **Setup job**: New glue that converts `invariants.yml` to matrix JSON — bridges A's config format with GitHub Actions matrix.
+1. **`InvariantResult` type**: Bridges C's per-invariant verification with B's JSON report contract. Contains `id`, `description`, `severity`, `status`, `message`, `violations[]`, and optional `error`.
 
-2. **Artifact-based result passing**: New pattern replacing B's in-memory JSON accumulation. Each verify job uploads `result.json`; report job downloads all via `pattern: result-*`.
+2. **`VerificationReport` type**: Top-level report type combining B's `summary` shape with per-result details. Used by both the engine and ci-trigger.
 
-3. **Inline prompt construction**: Each matrix job builds a prompt from the YAML fields, telling Claude to "follow CLAUDE.md instructions." This bridges A's CLAUDE.md (HOW to verify) with B's per-invariant prompt (WHAT to verify).
+3. **`exitCodeForReport()`**: Replaces C's `exitCodeForSummary()` — works with the new report type and checks severity at the result level.
 
-4. **Schema validation step**: Optional `ajv-cli` validation via npx in the setup job — non-blocking, warns on failure.
-
-## What Was Lost
+## What Was Lost From Non-Dominant Parents
 
 ### From Parent A
 
-- **Single-job simplicity**: A had one job. Crossbreed has 3 (setup → verify[N] → report). Trade-off: gained isolation and parallelism.
+- Zero-code simplicity (A required no custom code)
+- `claude-code-action@v1` direct usage
+- YAML invariant format
 
 ### From Parent B
 
-- **Composable stdin/stdout pipeline**: `verify | post-slack` is elegant. The matrix approach requires artifact-based passing instead. Only `post-slack.sh` retains the pipe pattern.
-- **Local CLI usage**: B's scripts worked locally with `./scripts/verify-invariants.sh | ./scripts/post-slack.sh`. Matrix approach is CI-native. Local testing requires running the workflow or using `act`.
+- `verify-invariants.sh` orchestrator (replaced by TypeScript engine)
+- `yq` dependency (JSON, not YAML)
+- Full shell-pipe composability (partially preserved)
 
 ### From Parent C
 
-- **Reusable TypeScript modules**: SourcegraphClient and SlackNotifier were designed for future agents. If needed, extract from the `prototype: agent-sdk-service` commit.
-- **Server mode / Slack bot**: The always-on Slack bot with threaded replies and `@mention` triggers. Deferred.
-- **Type safety**: No runtime types. JSON Schema validates config; CLAUDE.md validates agent output shape.
+- Server mode (Slack Bolt bot), `SlackNotifier` class
+- `Dockerfile`
+- `findReferences()` in SourcegraphClient
+- Threaded Slack violation reports
 
 ## Seam Locations
 
-| Seam               | Where                                   | What connects                               |
-| ------------------ | --------------------------------------- | ------------------------------------------- |
-| YAML → Matrix      | `setup` job → `$GITHUB_OUTPUT`          | A's config format → GitHub Actions matrix   |
-| Matrix → Prompt    | `verify` job, "Build prompt" step       | Matrix ID → yq extraction → Claude prompt   |
-| Prompt → CLAUDE.md | `verify` job, "Verify" step             | Per-invariant data → CLAUDE.md instructions |
-| Claude → Artifact  | `verify` job, grep + jq → `result.json` | Agent output → structured JSON              |
-| Artifacts → Report | `report` job, glob download             | Per-invariant results → merged report.json  |
-| Report → Slack     | `report` job → `post-slack.sh`          | JSON report → Slack Block Kit               |
-| Report → PR        | `report` job, inline gh CLI             | JSON report → GitHub PR comment             |
+1. **`invariant-engine.ts` <-> `sourcegraph-client.ts`**: Engine calls `sg.keywordSearch()` and `sg.searchInRepos()`. Client returns `RepoMatch[]` and `Map<string, SearchResult[]>`.
 
-## Self-Assessment
+2. **`index.ts` <-> `ci-trigger.ts`**: Index delegates CI logic to ci-trigger via the `VerificationReport` type.
 
-- **Coherence**: 4/5 — Feels like a natural GitHub-native design. The matrix strategy is the right abstraction for per-invariant isolation in CI. CLAUDE.md integration is clean. Only gap: some prompt-building logic is duplicated between PR and scheduled workflows.
+3. **TypeScript stdout <-> Shell scripts**: `index.ts` outputs JSON to stdout. Shell scripts consume via stdin pipe. The JSON report contract is the seam.
 
-- **Estimated effort to production-ready**: 1-2 days
-  - Test with real Sourcegraph instance
-  - Verify CLAUDE.md auto-discovery works with `claude -p --bare`
-  - Tune `--max-turns` per invariant complexity
-  - Consider extracting shared workflow logic into a reusable workflow
+4. **`invariants.json` <-> Zod schema**: Config validated at load time. Zod schema in `invariant-engine.ts` is the source of truth.
 
-## File Inventory
+## Self-Assessed Coherence: 4/5
 
-| File                                              | Lines    | Origin                           |
-| ------------------------------------------------- | -------- | -------------------------------- |
-| `.github/invariants.yml`                          | 42       | A                                |
-| `.github/invariants.schema.json`                  | 72       | C (concept) → JSON Schema        |
-| `.github/claude-mcp-config.json`                  | 12       | A/B                              |
-| `.github/workflows/invariant-check-pr.yml`        | 168      | A (base) + B (isolation)         |
-| `.github/workflows/invariant-check-scheduled.yml` | 139      | A (base) + B (isolation + Slack) |
-| `CLAUDE.md`                                       | 65       | A (enhanced)                     |
-| `scripts/post-slack.sh`                           | 96       | B (enhanced)                     |
-| `CROSSBREED_NOTES.md`                             | ~120     | New                              |
-| **Total (excl. notes)**                           | **~594** |                                  |
+Strong coherence. The TypeScript core (C) integrates cleanly with B's isolation pattern and output contract. The CLAUDE.md (A) documents the JSON format accurately. The main tension is having two PR comment posting paths (TypeScript `postPRComment()` and shell `post-github-comment.sh`) — intentional flexibility, not incoherence.
+
+Deduction: Shell scripts feel slightly foreign in a TypeScript project. Kept for composability with non-TypeScript workflows.
+
+## Estimated Effort to Production-Ready
+
+**1-2 days**
+
+- [ ] `npm install` and verify `tsc` compiles clean
+- [ ] Integration test with real Sourcegraph instance
+- [ ] Add `.gitignore` for `node_modules/` and `dist/`
+- [ ] Wire up GitHub Actions secrets
+- [ ] Test PR comment posting on a real PR
+- [ ] Test scheduled Slack webhook delivery
+
+## Line Count
+
+| File                                    | Lines     | Origin         |
+| --------------------------------------- | --------- | -------------- |
+| `src/sourcegraph-client.ts`             | 178       | C (kept)       |
+| `src/invariant-engine.ts`               | 273       | C+B (modified) |
+| `src/ci-trigger.ts`                     | 148       | C (simplified) |
+| `src/index.ts`                          | 149       | C (simplified) |
+| `scripts/post-slack.sh`                 | 95        | B (adapted)    |
+| `scripts/post-github-comment.sh`        | 89        | B (adapted)    |
+| `CLAUDE.md`                             | 74        | A (adapted)    |
+| `.github/workflows/invariant-check.yml` | 81        | B+C (combined) |
+| `invariants.json`                       | 64        | C (kept)       |
+| `package.json`                          | 22        | C (slimmed)    |
+| `tsconfig.json`                         | 16        | C (kept)       |
+| **Total**                               | **1,189** | vs C's 1,242   |
+
+Net reduction from Parent C: removed SlackNotifier (198 lines), Dockerfile (21 lines), simplified index (242->149). Engine grew (229->273) due to B's report types and isolation. Added shell scripts (184 lines) from B for composability. TypeScript core is 748 lines.
