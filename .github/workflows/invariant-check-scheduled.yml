@@ -1,89 +1,52 @@
-name: Cross-Repo Invariant Check (Weekly)
+name: Cross-Repo Invariant Check (Scheduled)
 
 on:
   schedule:
-    - cron: "0 9 * * 1" # Every Monday at 9am UTC
+    # Weekly: Monday 9am UTC
+    - cron: "0 9 * * 1"
   workflow_dispatch: # Allow manual trigger
 
 permissions:
   contents: read
 
 jobs:
-  full-scan:
+  verify-invariants:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Read invariants config
-        id: invariants
+      - name: Install tools
         run: |
-          echo "config<<EOF" >> "$GITHUB_OUTPUT"
-          cat .github/invariants.yml >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
 
-      - name: Run full invariant scan
-        id: scan
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          max_turns: 15
-          allowed_tools: "mcp__sourcegraph__keyword_search,mcp__sourcegraph__find_references,mcp__sourcegraph__read_file"
-          mcp_config: .github/claude-mcp-config.json
-          direct_prompt: |
-            You are a cross-repo invariant verifier running a full weekly scan.
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
 
-            Read CLAUDE.md for detailed instructions on how to verify invariants.
-
-            Here are the invariants to verify:
-            ${{ steps.invariants.outputs.config }}
-
-            This is a FULL SCAN — check every invariant exhaustively across all
-            indexed repositories, not just one repo.
-
-            For each invariant:
-            1. Use Sourcegraph keyword_search to find ALL matches across all repos
-            2. For each match, verify the assertion holds
-            3. Collect all violations
-
-            Output your findings as a structured report in this exact format:
-
-            INVARIANT_REPORT_START
-            ## Cross-Repo Invariant Report — Weekly Scan
-
-            **Date:** $(date -u +%Y-%m-%d)
-            **Invariants checked:** N
-            **Violations found:** N
-
-            ### Results
-
-            [For each invariant, list: status, repos checked, violations with details]
-
-            ### Action Items
-
-            [List violations grouped by team/codeowner if possible]
-            INVARIANT_REPORT_END
+      - name: Verify cross-repo invariants
+        id: verify
         env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SOURCEGRAPH_ENDPOINT: ${{ secrets.SOURCEGRAPH_ENDPOINT }}
           SOURCEGRAPH_TOKEN: ${{ secrets.SOURCEGRAPH_TOKEN }}
+        run: |
+          chmod +x scripts/verify-invariants.sh
+          scripts/verify-invariants.sh -v > report.json || true
 
       - name: Post to Slack
+        if: always() && steps.verify.outcome != 'cancelled'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          chmod +x scripts/post-slack.sh
+          cat report.json | scripts/post-slack.sh
+
+      - name: Upload report artifact
         if: always()
-        uses: slackapi/slack-github-action@v2.1.0
+        uses: actions/upload-artifact@v4
         with:
-          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
-          webhook-type: incoming-webhook
-          payload: |
-            {
-              "text": "🔍 Weekly Cross-Repo Invariant Scan Complete",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "🔍 *Weekly Cross-Repo Invariant Scan Complete*\nSee full results: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
-                  }
-                }
-              ]
-            }
+          name: invariant-report-${{ github.run_id }}
+          path: report.json
+          retention-days: 30

@@ -12,7 +12,7 @@ on:
       - "**/package.json"
       - "**/go.mod"
       - "**/requirements.txt"
-      - ".github/invariants.yml"
+      - "invariants.yaml"
 
 permissions:
   contents: read
@@ -21,49 +21,44 @@ permissions:
 jobs:
   verify-invariants:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Read invariants config
-        id: invariants
+      - name: Install tools
         run: |
-          # Pass invariants file content to Claude via environment
-          echo "config<<EOF" >> "$GITHUB_OUTPUT"
-          cat .github/invariants.yml >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          # Install yq for YAML parsing
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
 
       - name: Verify cross-repo invariants
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          max_turns: 15
-          allowed_tools: "mcp__sourcegraph__keyword_search,mcp__sourcegraph__find_references,mcp__sourcegraph__read_file"
-          mcp_config: .github/claude-mcp-config.json
-          direct_prompt: |
-            You are a cross-repo invariant verifier. Your job is to check that
-            declared invariants hold across all repositories indexed by Sourcegraph.
-
-            Read CLAUDE.md for detailed instructions on how to verify invariants.
-
-            Here are the invariants to verify:
-            ${{ steps.invariants.outputs.config }}
-
-            Context: This is a PR check on repository ${{ github.repository }},
-            PR #${{ github.event.pull_request.number }}.
-            Changed files in this PR may have introduced violations.
-
-            For each invariant:
-            1. Use Sourcegraph keyword_search to find matches for the search pattern
-            2. For each match, verify the assertion holds
-            3. Report violations clearly
-
-            Format your response as a PR comment:
-            - Start with a summary: ✅ All invariants pass OR ❌ N violations found
-            - List each invariant checked with its result
-            - For violations, show: repo, file, line, and the invariant message
-            - Keep it concise — engineers scan these quickly
+        id: verify
         env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SOURCEGRAPH_ENDPOINT: ${{ secrets.SOURCEGRAPH_ENDPOINT }}
           SOURCEGRAPH_TOKEN: ${{ secrets.SOURCEGRAPH_TOKEN }}
+        run: |
+          chmod +x scripts/verify-invariants.sh
+          # Run verifier; capture output even on failure (exit 1 = violations found)
+          scripts/verify-invariants.sh -v > report.json || true
+          echo "report_file=report.json" >> "$GITHUB_OUTPUT"
+
+      - name: Post PR comment
+        if: always() && steps.verify.outcome != 'cancelled'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x scripts/post-github-comment.sh
+          cat report.json | scripts/post-github-comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}"
+
+      - name: Fail on violations
+        run: |
+          FAILED=$(jq -r '.summary.failed' report.json)
+          if [[ "$FAILED" -gt 0 ]]; then
+            echo "::error::$FAILED invariant violation(s) found"
+            exit 1
+          fi
