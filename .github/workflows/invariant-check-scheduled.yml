@@ -2,43 +2,174 @@ name: Cross-Repo Invariant Check (Scheduled)
 
 on:
   schedule:
-    # Weekly: Monday 9am UTC
-    - cron: "0 9 * * 1"
-  workflow_dispatch: # Allow manual trigger
+    - cron: "0 9 * * 1" # Weekly: Monday 9am UTC
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  verify-invariants:
+  # --- Step 1: Parse invariants into matrix ---
+  setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+      count: ${{ steps.parse.outputs.count }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Parse invariants into matrix
+        id: parse
+        run: |
+          MATRIX=$(yq -o=json '.invariants | [.[] | {"id": .id}]' .github/invariants.yml | jq -c '{include: .}')
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          COUNT=$(yq '.invariants | length' .github/invariants.yml)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+  # --- Step 2: One job per invariant ---
+  verify:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Install tools
         run: |
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
+          npm install -g @anthropic-ai/claude-code
 
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
-
-      - name: Verify cross-repo invariants
-        id: verify
+      - name: Verify ${{ matrix.id }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SOURCEGRAPH_ENDPOINT: ${{ secrets.SOURCEGRAPH_ENDPOINT }}
           SOURCEGRAPH_TOKEN: ${{ secrets.SOURCEGRAPH_TOKEN }}
         run: |
-          chmod +x scripts/verify-invariants.sh
-          scripts/verify-invariants.sh -v > report.json || true
+          INV_ID="${{ matrix.id }}"
+          INV=$(yq -o=json ".invariants[] | select(.id == \"$INV_ID\")" .github/invariants.yml)
+
+          DESC=$(echo "$INV" | jq -r '.description')
+          SEVERITY=$(echo "$INV" | jq -r '.severity')
+          SEARCH=$(echo "$INV" | jq -r '.search.pattern')
+          LANG=$(echo "$INV" | jq -r '.search.language // empty')
+          MESSAGE=$(echo "$INV" | jq -r '.message')
+
+          if echo "$INV" | jq -e '.assertion.must_not_exist' > /dev/null 2>&1; then
+            ASSERT_TYPE="must_not_exist"; ASSERT_PATTERN=""
+          elif echo "$INV" | jq -e '.assertion.must_contain' > /dev/null 2>&1; then
+            ASSERT_TYPE="must_contain"; ASSERT_PATTERN=$(echo "$INV" | jq -r '.assertion.must_contain')
+          elif echo "$INV" | jq -e '.assertion.must_not_contain' > /dev/null 2>&1; then
+            ASSERT_TYPE="must_not_contain"; ASSERT_PATTERN=$(echo "$INV" | jq -r '.assertion.must_not_contain')
+          fi
+          SCOPE=$(echo "$INV" | jq -r '.assertion.scope // "repo"')
+
+          LANG_LINE=""
+          [[ -n "$LANG" ]] && LANG_LINE="Filter results to language: $LANG."
+
+          PROMPT="Verify this cross-repo invariant using the instructions in CLAUDE.md.
+
+          INVARIANT: $INV_ID
+          DESCRIPTION: $DESC
+          SEVERITY: $SEVERITY
+
+          SEARCH:
+            pattern: $SEARCH
+            $LANG_LINE
+
+          ASSERTION:
+            type: $ASSERT_TYPE
+            pattern: $ASSERT_PATTERN
+            scope: $SCOPE
+
+          Return ONLY a JSON object per the Output Contract in CLAUDE.md."
+
+          CLAUDE_OUTPUT=""
+          if CLAUDE_OUTPUT=$(echo "$PROMPT" | claude -p --bare \
+            --mcp-config .github/claude-mcp-config.json \
+            --max-turns 10 \
+            --allowedTools "mcp__sourcegraph__keyword_search,mcp__sourcegraph__find_references,mcp__sourcegraph__read_file" \
+            2>/dev/null); then
+            RESULT_JSON=$(echo "$CLAUDE_OUTPUT" | grep -o '{.*}' | head -1 || echo "")
+            if [[ -n "$RESULT_JSON" ]] && echo "$RESULT_JSON" | jq . &>/dev/null; then
+              STATUS=$(echo "$RESULT_JSON" | jq -r '.status')
+              VIOLATIONS=$(echo "$RESULT_JSON" | jq -c '.violations')
+            else
+              STATUS="error"; VIOLATIONS="[]"
+            fi
+          else
+            STATUS="error"; VIOLATIONS="[]"
+          fi
+
+          jq -n \
+            --arg id "$INV_ID" --arg desc "$DESC" --arg severity "$SEVERITY" \
+            --arg status "$STATUS" --arg message "$MESSAGE" \
+            --argjson violations "$VIOLATIONS" \
+            '{id: $id, description: $desc, severity: $severity, status: $status, message: $message, violations: $violations}' \
+            > result.json
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.id }}
+          path: result.json
+          retention-days: 30
+
+  # --- Step 3: Collect results, post to Slack ---
+  report:
+    needs: [setup, verify]
+    if: always() && needs.setup.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: results/
+
+      - name: Assemble report
+        run: |
+          RESULTS="[]"
+          PASS=0; FAIL=0; ERRORS=0
+
+          for dir in results/result-*/; do
+            if [[ -f "$dir/result.json" ]]; then
+              ENTRY=$(cat "$dir/result.json")
+              STATUS=$(echo "$ENTRY" | jq -r '.status')
+              case "$STATUS" in
+                pass)  PASS=$((PASS + 1)) ;;
+                fail)  FAIL=$((FAIL + 1)) ;;
+                *)     ERRORS=$((ERRORS + 1)) ;;
+              esac
+              RESULTS=$(echo "$RESULTS" | jq --argjson e "$ENTRY" '. + [$e]')
+            fi
+          done
+
+          jq -n \
+            --argjson results "$RESULTS" \
+            --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson total "${{ needs.setup.outputs.count }}" \
+            --argjson passed "$PASS" \
+            --argjson failed "$FAIL" \
+            --argjson errors "$ERRORS" \
+            '{timestamp: $timestamp, summary: {total: $total, passed: $passed, failed: $failed, errors: $errors}, results: $results}' \
+            > report.json
 
       - name: Post to Slack
-        if: always() && steps.verify.outcome != 'cancelled'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_CHANNEL: ${{ vars.SLACK_CHANNEL || '' }}
         run: |
           chmod +x scripts/post-slack.sh
           cat report.json | scripts/post-slack.sh

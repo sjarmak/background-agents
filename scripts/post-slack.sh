@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# post-slack.sh — Takes an invariant report on stdin, posts to Slack webhook.
+# post-slack.sh — Takes an invariant report JSON on stdin, posts rich Slack message.
+#
+# Origin: Parent B (cli-hooks), enhanced with Block Kit formatting.
 #
 # Usage:
-#   ./scripts/verify-invariants.sh | ./scripts/post-slack.sh
+#   cat report.json | ./scripts/post-slack.sh
 #
 # Environment:
 #   SLACK_WEBHOOK_URL — Slack incoming webhook URL (required)
@@ -15,17 +17,14 @@ if [[ -z "${SLACK_WEBHOOK_URL:-}" ]]; then
   exit 1
 fi
 
-# Read report from stdin
 REPORT=$(cat)
 
-# Parse summary
 TOTAL=$(echo "$REPORT" | jq -r '.summary.total')
 PASSED=$(echo "$REPORT" | jq -r '.summary.passed')
 FAILED=$(echo "$REPORT" | jq -r '.summary.failed')
 ERRORS=$(echo "$REPORT" | jq -r '.summary.errors')
 TIMESTAMP=$(echo "$REPORT" | jq -r '.timestamp')
 
-# Build header
 if [[ "$FAILED" -eq 0 && "$ERRORS" -eq 0 ]]; then
   HEADER=":white_check_mark: All $TOTAL cross-repo invariants pass"
   COLOR="good"
@@ -34,23 +33,20 @@ else
   COLOR="danger"
 fi
 
-# Build violation details
 DETAILS=""
 RESULT_COUNT=$(echo "$REPORT" | jq '.results | length')
 for i in $(seq 0 $((RESULT_COUNT - 1))); do
   STATUS=$(echo "$REPORT" | jq -r ".results[$i].status")
   ID=$(echo "$REPORT" | jq -r ".results[$i].id")
   SEVERITY=$(echo "$REPORT" | jq -r ".results[$i].severity")
-  DESC=$(echo "$REPORT" | jq -r ".results[$i].description")
 
   if [[ "$STATUS" == "pass" ]]; then
+    DESC=$(echo "$REPORT" | jq -r ".results[$i].description")
     DETAILS+=":white_check_mark: *${ID}* (${SEVERITY}) — ${DESC}\n"
   elif [[ "$STATUS" == "fail" ]]; then
-    MESSAGE=$(echo "$REPORT" | jq -r ".results[$i].message")
     VIOLATION_COUNT=$(echo "$REPORT" | jq ".results[$i].violations | length")
     DETAILS+=":x: *${ID}* (${SEVERITY}) — ${VIOLATION_COUNT} violation(s)\n"
 
-    # List up to 5 violations
     LIMIT=$((VIOLATION_COUNT < 5 ? VIOLATION_COUNT : 5))
     for j in $(seq 0 $((LIMIT - 1))); do
       REPO=$(echo "$REPORT" | jq -r ".results[$i].violations[$j].repo")
@@ -61,13 +57,13 @@ for i in $(seq 0 $((RESULT_COUNT - 1))); do
     if [[ "$VIOLATION_COUNT" -gt 5 ]]; then
       DETAILS+="    • _...and $((VIOLATION_COUNT - 5)) more_\n"
     fi
+    MESSAGE=$(echo "$REPORT" | jq -r ".results[$i].message")
     DETAILS+="    _${MESSAGE}_\n"
   else
     DETAILS+=":warning: *${ID}* (${SEVERITY}) — error during check\n"
   fi
 done
 
-# Build Slack payload
 PAYLOAD=$(jq -n \
   --arg color "$COLOR" \
   --arg header "$HEADER" \
@@ -85,7 +81,6 @@ PAYLOAD=$(jq -n \
     }]
   } + (if $channel != "" then {channel: $channel} else {} end)')
 
-# Post to Slack
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
   -X POST \
   -H "Content-Type: application/json" \
