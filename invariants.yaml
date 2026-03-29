@@ -16,6 +16,23 @@
 #   message     — violation message shown to engineers
 
 invariants:
+  # ──────────────────────────────────────────────────────────────────────
+  # CANARY INVARIANT — must always FAIL (find a violation).
+  # A "pass" (zero matches) means the verification pipeline cannot detect
+  # violations and the entire run should be treated as an error.
+  # ──────────────────────────────────────────────────────────────────────
+  - id: canary-verification-active
+    description: "CANARY: This synthetic invariant must always detect a violation in the canary-test-fixture repo. If it passes, the verification pipeline is broken."
+    severity: critical
+    search:
+      pattern: "CANARY_INVARIANT_MARKER_DO_NOT_REMOVE"
+      language: ""
+    assertion:
+      type: must_not_exist
+      pattern: ""
+      scope: repo
+    message: "CANARY OK — this violation is expected and confirms the pipeline is working"
+
   - id: auth-init-required
     description: "Every service importing auth-lib MUST call auth.init() in its entrypoint"
     severity: critical

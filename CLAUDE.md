@@ -96,6 +96,12 @@ You MUST return ONLY a valid JSON object — no markdown fences, no explanation,
 > Fix: Choose one database client per repository.
 ```
 
+### Canary Invariant
+
+The invariant with id `canary-*` is a synthetic test. It MUST always find a violation.
+If your verification of a canary invariant finds zero matches, something is wrong with
+the Sourcegraph connection or search. Report status "fail" with a violation for canary invariants.
+
 ### Weekly Report (scheduled)
 
 Include totals, trends if possible, and group violations by team/codeowner.
