@@ -6,6 +6,10 @@ on:
     - cron: "0 9 * * 1"
   workflow_dispatch: # Allow manual trigger
 
+concurrency:
+  group: invariant-check-scheduled
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -17,13 +21,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Install yq
         run: |
-          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
+          YQ_VERSION="v4.44.1"
+          YQ_SHA256="a7df369b3129c22ade6b3c05b9b71271af28a0c41a3d9e205a91baa44a9f4450"
+          wget -qO /tmp/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  /tmp/yq" | sha256sum -c -
+          sudo install /tmp/yq /usr/local/bin/yq
 
       - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @anthropic-ai/claude-code@1.0.33
 
       - name: Verify cross-repo invariants
         id: verify

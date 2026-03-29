@@ -3,8 +3,10 @@
 #
 # Usage:
 #   ./scripts/verify-invariants.sh | ./scripts/post-github-comment.sh owner/repo 123
+#   ./scripts/verify-invariants.sh | ./scripts/post-github-comment.sh --format-only owner/repo 123
 #
 # Arguments:
+#   --format-only (optional) — Output formatted markdown to stdout instead of posting
 #   $1 — Repository (owner/repo format)
 #   $2 — PR number
 #
@@ -13,10 +15,16 @@
 
 set -euo pipefail
 
-REPO="${1:?Usage: $0 OWNER/REPO PR_NUMBER}"
-PR_NUMBER="${2:?Usage: $0 OWNER/REPO PR_NUMBER}"
+FORMAT_ONLY=false
+if [[ "${1:-}" == "--format-only" ]]; then
+  FORMAT_ONLY=true
+  shift
+fi
 
-if ! command -v gh &>/dev/null; then
+REPO="${1:?Usage: $0 [--format-only] OWNER/REPO PR_NUMBER}"
+PR_NUMBER="${2:?Usage: $0 [--format-only] OWNER/REPO PR_NUMBER}"
+
+if [[ "$FORMAT_ONLY" == "false" ]] && ! command -v gh &>/dev/null; then
   echo "Error: 'gh' CLI is required" >&2
   exit 1
 fi
@@ -91,7 +99,11 @@ fi
 
 COMMENT+="\n---\n_Checked by Cross-Repo Invariant Verifier_"
 
-# Post comment using gh CLI
-echo -e "$COMMENT" | gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file -
-
-echo "Posted comment to $REPO#$PR_NUMBER" >&2
+if [[ "$FORMAT_ONLY" == "true" ]]; then
+  # Output formatted markdown to stdout
+  echo -e "$COMMENT"
+else
+  # Post comment using gh CLI
+  echo -e "$COMMENT" | gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file -
+  echo "Posted comment to $REPO#$PR_NUMBER" >&2
+fi

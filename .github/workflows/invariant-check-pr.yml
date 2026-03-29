@@ -13,6 +13,11 @@ on:
       - "**/go.mod"
       - "**/requirements.txt"
       - "invariants.yaml"
+      - "CLAUDE.md"
+
+concurrency:
+  group: invariant-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -36,14 +41,16 @@ jobs:
           git show "origin/${{ github.event.pull_request.base.ref }}:invariants.schema.json" > invariants.schema.json 2>/dev/null || true
           echo "Using invariants.yaml and CLAUDE.md from base branch: ${{ github.event.pull_request.base.ref }}"
 
-      - name: Install tools
+      - name: Install yq
         run: |
-          # Install yq for YAML parsing
-          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
+          YQ_VERSION="v4.44.1"
+          YQ_SHA256="a7df369b3129c22ade6b3c05b9b71271af28a0c41a3d9e205a91baa44a9f4450"
+          wget -qO /tmp/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  /tmp/yq" | sha256sum -c -
+          sudo install /tmp/yq /usr/local/bin/yq
 
       - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @anthropic-ai/claude-code@1.0.33
 
       - name: Validate invariants config
         run: |
@@ -65,19 +72,41 @@ jobs:
           # Run verifier; capture output even on failure (exit 1 = violations found)
           scripts/verify-invariants.sh -v > report.json || true
 
-      - name: Post PR comment
+      - name: Post or update PR comment
         if: always() && steps.verify.outcome != 'cancelled'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          chmod +x scripts/post-github-comment.sh
-          cat report.json | scripts/post-github-comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
+          PR="${{ github.event.pull_request.number }}"
+          MARKER="<!-- invariant-check-bot -->"
 
-      - name: Fail on violations or errors
+          # Build comment body
+          BODY=$(cat report.json | scripts/post-github-comment.sh --format-only "$REPO" "$PR")
+          BODY="${MARKER}\n${BODY}"
+
+          # Find existing bot comment
+          EXISTING=$(gh api "repos/$REPO/issues/$PR/comments" --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -1)
+
+          if [[ -n "$EXISTING" ]]; then
+            echo -e "$BODY" | gh api "repos/$REPO/issues/comments/$EXISTING" -X PATCH --field body=@-
+            echo "Updated existing comment $EXISTING"
+          else
+            echo -e "$BODY" | gh pr comment "$PR" --repo "$REPO" --body-file -
+            echo "Created new comment"
+          fi
+
+      - name: Fail on violations, errors, or incomplete results
         run: |
           FAILED=$(jq -r '.summary.failed' report.json)
-          ERRORS=$(jq -r '.summary.errors' report.json)
+          ERRORS=$(jq -r '.summary.errors // 0' report.json)
+          CHECKED=$(jq -r '.summary.checked // .summary.total' report.json)
+          TOTAL=$(jq -r '.summary.total' report.json)
           if [[ "$FAILED" -gt 0 || "$ERRORS" -gt 0 ]]; then
             echo "::error::$FAILED violation(s), $ERRORS error(s) found"
+            exit 1
+          fi
+          if [[ "$CHECKED" -lt "$TOTAL" ]]; then
+            echo "::error::Only $CHECKED of $TOTAL invariants were checked (incomplete run)"
             exit 1
           fi
