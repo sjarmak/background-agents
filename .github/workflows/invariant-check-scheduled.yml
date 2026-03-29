@@ -1,0 +1,89 @@
+name: Cross-Repo Invariant Check (Weekly)
+
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Every Monday at 9am UTC
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  full-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read invariants config
+        id: invariants
+        run: |
+          echo "config<<EOF" >> "$GITHUB_OUTPUT"
+          cat .github/invariants.yml >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Run full invariant scan
+        id: scan
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          max_turns: 15
+          allowed_tools: "mcp__sourcegraph__keyword_search,mcp__sourcegraph__find_references,mcp__sourcegraph__read_file"
+          mcp_config: .github/claude-mcp-config.json
+          direct_prompt: |
+            You are a cross-repo invariant verifier running a full weekly scan.
+
+            Read CLAUDE.md for detailed instructions on how to verify invariants.
+
+            Here are the invariants to verify:
+            ${{ steps.invariants.outputs.config }}
+
+            This is a FULL SCAN — check every invariant exhaustively across all
+            indexed repositories, not just one repo.
+
+            For each invariant:
+            1. Use Sourcegraph keyword_search to find ALL matches across all repos
+            2. For each match, verify the assertion holds
+            3. Collect all violations
+
+            Output your findings as a structured report in this exact format:
+
+            INVARIANT_REPORT_START
+            ## Cross-Repo Invariant Report — Weekly Scan
+
+            **Date:** $(date -u +%Y-%m-%d)
+            **Invariants checked:** N
+            **Violations found:** N
+
+            ### Results
+
+            [For each invariant, list: status, repos checked, violations with details]
+
+            ### Action Items
+
+            [List violations grouped by team/codeowner if possible]
+            INVARIANT_REPORT_END
+        env:
+          SOURCEGRAPH_ENDPOINT: ${{ secrets.SOURCEGRAPH_ENDPOINT }}
+          SOURCEGRAPH_TOKEN: ${{ secrets.SOURCEGRAPH_TOKEN }}
+
+      - name: Post to Slack
+        if: always()
+        uses: slackapi/slack-github-action@v2.1.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "🔍 Weekly Cross-Repo Invariant Scan Complete",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "🔍 *Weekly Cross-Repo Invariant Scan Complete*\nSee full results: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                  }
+                }
+              ]
+            }

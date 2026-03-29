@@ -1,0 +1,69 @@
+name: Cross-Repo Invariant Check (PR)
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - "**/*.ts"
+      - "**/*.js"
+      - "**/*.go"
+      - "**/*.py"
+      - "**/*.java"
+      - "**/package.json"
+      - "**/go.mod"
+      - "**/requirements.txt"
+      - ".github/invariants.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  verify-invariants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read invariants config
+        id: invariants
+        run: |
+          # Pass invariants file content to Claude via environment
+          echo "config<<EOF" >> "$GITHUB_OUTPUT"
+          cat .github/invariants.yml >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Verify cross-repo invariants
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          max_turns: 15
+          allowed_tools: "mcp__sourcegraph__keyword_search,mcp__sourcegraph__find_references,mcp__sourcegraph__read_file"
+          mcp_config: .github/claude-mcp-config.json
+          direct_prompt: |
+            You are a cross-repo invariant verifier. Your job is to check that
+            declared invariants hold across all repositories indexed by Sourcegraph.
+
+            Read CLAUDE.md for detailed instructions on how to verify invariants.
+
+            Here are the invariants to verify:
+            ${{ steps.invariants.outputs.config }}
+
+            Context: This is a PR check on repository ${{ github.repository }},
+            PR #${{ github.event.pull_request.number }}.
+            Changed files in this PR may have introduced violations.
+
+            For each invariant:
+            1. Use Sourcegraph keyword_search to find matches for the search pattern
+            2. For each match, verify the assertion holds
+            3. Report violations clearly
+
+            Format your response as a PR comment:
+            - Start with a summary: ✅ All invariants pass OR ❌ N violations found
+            - List each invariant checked with its result
+            - For violations, show: repo, file, line, and the invariant message
+            - Keep it concise — engineers scan these quickly
+        env:
+          SOURCEGRAPH_ENDPOINT: ${{ secrets.SOURCEGRAPH_ENDPOINT }}
+          SOURCEGRAPH_TOKEN: ${{ secrets.SOURCEGRAPH_TOKEN }}
