@@ -1,0 +1,83 @@
+name: Cross-Repo Invariant Check (PR)
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - "**/*.ts"
+      - "**/*.js"
+      - "**/*.go"
+      - "**/*.py"
+      - "**/*.java"
+      - "**/package.json"
+      - "**/go.mod"
+      - "**/requirements.txt"
+      - "invariants.yaml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  verify-invariants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pin trusted config to base branch
+        run: |
+          # Prevent PR authors from modifying their own invariant checks or agent instructions.
+          # Always use the base branch versions of these trust-boundary files.
+          git fetch origin "${{ github.event.pull_request.base.ref }}" --depth=1
+          git show "origin/${{ github.event.pull_request.base.ref }}:invariants.yaml" > invariants.yaml 2>/dev/null || echo "invariants: []" > invariants.yaml
+          git show "origin/${{ github.event.pull_request.base.ref }}:CLAUDE.md" > CLAUDE.md 2>/dev/null || true
+          git show "origin/${{ github.event.pull_request.base.ref }}:invariants.schema.json" > invariants.schema.json 2>/dev/null || true
+          echo "Using invariants.yaml and CLAUDE.md from base branch: ${{ github.event.pull_request.base.ref }}"
+
+      - name: Install tools
+        run: |
+          # Install yq for YAML parsing
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Validate invariants config
+        run: |
+          # Optional: validate against JSON Schema if ajv-cli is available
+          if npx ajv-cli validate -s invariants.schema.json -d invariants.yaml --spec=draft2020 2>/dev/null; then
+            echo "Config validation passed"
+          else
+            echo "::warning::Schema validation skipped or failed (non-blocking)"
+          fi
+
+      - name: Verify cross-repo invariants
+        id: verify
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SOURCEGRAPH_ENDPOINT: ${{ secrets.SOURCEGRAPH_ENDPOINT }}
+          SOURCEGRAPH_TOKEN: ${{ secrets.SOURCEGRAPH_TOKEN }}
+        run: |
+          chmod +x scripts/verify-invariants.sh
+          # Run verifier; capture output even on failure (exit 1 = violations found)
+          scripts/verify-invariants.sh -v > report.json || true
+
+      - name: Post PR comment
+        if: always() && steps.verify.outcome != 'cancelled'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x scripts/post-github-comment.sh
+          cat report.json | scripts/post-github-comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}"
+
+      - name: Fail on violations or errors
+        run: |
+          FAILED=$(jq -r '.summary.failed' report.json)
+          ERRORS=$(jq -r '.summary.errors' report.json)
+          if [[ "$FAILED" -gt 0 || "$ERRORS" -gt 0 ]]; then
+            echo "::error::$FAILED violation(s), $ERRORS error(s) found"
+            exit 1
+          fi

@@ -1,7 +1,6 @@
 # Cross-Repo Invariant Verifier — Agent Instructions
 
-You are verifying a single cross-repo invariant using Sourcegraph MCP tools.
-You will be told WHICH invariant to check. This file teaches you HOW.
+You are verifying cross-repo invariants using Sourcegraph MCP tools.
 
 ## Available Tools
 
@@ -9,7 +8,7 @@ You will be told WHICH invariant to check. This file teaches you HOW.
 - `mcp__sourcegraph__find_references` — Find all references to a symbol across repos
 - `mcp__sourcegraph__read_file` — Read a specific file from any indexed repository
 
-## Invariant Format
+## How to Verify Invariants
 
 Each invariant in `invariants.json` has this structure:
 
@@ -27,13 +26,13 @@ Each invariant in `invariants.json` has this structure:
     "pattern": "regex for assertion check",
     "scope": "repo | file"
   },
-  "message": "Violation explanation"
+  "message": "Violation explanation shown to engineers"
 }
 ```
 
-## Verification Steps
+### Verification Steps
 
-For the invariant you are assigned:
+For each invariant:
 
 1. **Search**: Use `keyword_search` with the `search.pattern` to find all matches.
    - Use `language` filter when available to reduce false positives.
@@ -50,8 +49,9 @@ For the invariant you are assigned:
 - For `scope: repo`, you only need one positive match of the assertion per repo.
 - Search broadly first, then narrow down — Sourcegraph may paginate results.
 - If a search returns too many results, try adding language or repo filters.
+- Prioritize by severity: check `critical` invariants first.
 
-## Output Contract
+### Output Contract
 
 You MUST return ONLY a valid JSON object — no markdown fences, no explanation, no surrounding text.
 
@@ -72,3 +72,30 @@ You MUST return ONLY a valid JSON object — no markdown fences, no explanation,
 - If no violations: `{"status": "pass", "violations": []}`
 - If violations found: `{"status": "fail", "violations": [...]}`
 - If an error occurs: `{"status": "error", "violations": [], "error": "description"}`
+
+## Output Formats (for report consumers)
+
+### PR Comment (CI trigger)
+
+```
+## Cross-Repo Invariant Check
+
+✅ **3 invariants passed** | ❌ **1 violation found**
+
+| Invariant | Status | Details |
+|-----------|--------|---------|
+| auth-init-required | ✅ Pass | 12 repos checked |
+| no-dual-db-clients | ❌ FAIL | 2 repos in violation |
+
+### Violations
+
+**no-dual-db-clients** (high severity)
+- `payments-service` — imports both clients in `src/db/connection.ts:14`
+- `user-service` — imports both clients in `lib/database.go:8`
+
+> Fix: Choose one database client per repository.
+```
+
+### Weekly Report (scheduled)
+
+Include totals, trends if possible, and group violations by team/codeowner.
