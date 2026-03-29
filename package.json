@@ -1,0 +1,24 @@
+{
+  "name": "cross-repo-invariant-verifier",
+  "version": "0.1.0",
+  "description": "Background agent that verifies cross-repo invariants using Sourcegraph MCP + Claude Agent SDK",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "verify": "tsx src/index.ts --mode=cli",
+    "serve": "tsx src/index.ts --mode=server"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "^1.0.0",
+    "@slack/bolt": "^4.1.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

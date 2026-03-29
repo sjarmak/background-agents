@@ -1,71 +1,62 @@
-# Prototype Notes — Cross-Repo Invariant Verifier (CLI-Hooks Strategy)
+# Prototype Notes: Cross-Repo Invariant Verifier
 
 ## Approach Summary
 
-Unix-pipe style: shell scripts + `claude -p --bare` CLI with Sourcegraph MCP. No frameworks, no Docker, no npm dependencies beyond the Claude CLI itself. Everything composes via stdin/stdout.
+TypeScript service using the Claude Agent SDK (`@anthropic-ai/claude-code`) with Sourcegraph MCP configured programmatically. The agent verifies cross-repo invariants — rules like "every repo importing auth-lib must call auth.init()" — by searching across all repos via Sourcegraph and checking assertions against the results.
 
-**Pipeline:** `invariants.yaml` → `verify-invariants.sh` → JSON report → `post-slack.sh` / `post-github-comment.sh`
+Three operational modes:
+- **CLI**: One-shot verification, prints results, exits with appropriate code
+- **CI**: GitHub Actions integration, posts violations as PR comments
+- **Server**: Long-lived Slack bot with scheduled weekly scans
 
 ## Key Design Decisions
 
-| Decision                                | Why                                                                                                                                                                                                   |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **YAML config, not code**               | Engineers declare invariants without writing verification logic. Adding a new invariant is a 10-line YAML block.                                                                                      |
-| **One Claude call per invariant**       | Isolation — a flaky invariant can't poison others. Each call gets its own max-turns budget and error handling. Trade-off: more API calls, but cleaner failure modes.                                  |
-| **JSON intermediate format**            | The report is the contract between verify and post scripts. Any consumer (Slack, GitHub, PagerDuty, Datadog) just needs to read JSON.                                                                 |
-| **`yq` + `jq` for parsing**             | Avoids Python/Node runtime dependencies. These are standard CI tools. `yq` reads the YAML config; `jq` builds and transforms JSON.                                                                    |
-| **Structured prompt → JSON output**     | Claude is instructed to return ONLY JSON. The script extracts it with `grep -o '{.*}'` — fragile but sufficient for a prototype. Production would use `--output-format json` or a more robust parser. |
-| **Separate PR and scheduled workflows** | Different triggers need different outputs (PR comment vs Slack). Sharing the same verify script keeps logic DRY.                                                                                      |
-| **`--allowedTools` whitelist**          | Safety rail — Claude can only use Sourcegraph search tools, not write files or run commands.                                                                                                          |
+1. **JSON invariant config with Zod validation** — Chose JSON over YAML (despite existing `.github/invariants.yml`) because JSON schema validation is native and Zod provides runtime type safety. The YAML version can coexist for human authoring; a converter is trivial.
 
-## What Works
+2. **Claude Agent SDK as Sourcegraph interface** — Rather than calling Sourcegraph REST API directly, we invoke Claude Code with Sourcegraph MCP tools whitelisted. This means the agent can reason about search results, handle pagination, and adapt queries — but adds latency and cost vs direct API calls.
 
-- **`invariants.yaml`** — fully defined, realistic examples covering 4 invariant types
-- **`verify-invariants.sh`** — complete orchestrator with arg parsing, prerequisite checks, per-invariant Claude calls, JSON report assembly, and proper exit codes
-- **`post-slack.sh`** — formats violations into Slack blocks with severity coloring, truncates long lists
-- **`post-github-comment.sh`** — renders markdown table + violation details with source links
-- **Both GitHub Actions workflows** — PR trigger with path filters, scheduled weekly cron, artifact upload
-- **`mcp-config.json`** — real Sourcegraph MCP server config with env var substitution
+3. **Three assertion types** — `must_contain`, `must_not_contain`, `must_not_exist` cover the invariant patterns from the PRD. File-scope vs repo-scope assertions handle both "every file doing X must also do Y" and "every repo doing X must also do Y".
 
-## What's Stubbed / Incomplete
+4. **Reusable modules** — `SourcegraphClient` and `SlackNotifier` are designed with clean interfaces for direct reuse by Week 2-3 agents. No invariant-specific logic leaks into them.
 
-- **No actual Sourcegraph instance to test against** — the Claude calls are real CLI invocations, but we can't verify the MCP round-trip works end-to-end without a Sourcegraph deployment
-- **JSON extraction from Claude output is fragile** — `grep -o '{.*}'` will break if Claude returns multi-line JSON or includes JSON in explanations. Production needs structured output parsing
-- **No caching** — each run re-checks every invariant from scratch. A production version could cache Sourcegraph results and only re-verify changed repos
-- **No retry logic** — if a Claude call fails mid-way (rate limit, timeout), the invariant is marked as "error" with no retry
-- **Slack payload uses blocks API** — tested structure but not against a real webhook
-- **No CLAUDE.md with verifier instructions** — the existing workflow references it, but we inline the prompt directly instead
+5. **Safety rails** — `maxTurns: 12`, explicit `allowedTools` whitelist (only Sourcegraph MCP tools), and `--bare` mode via the Agent SDK options.
+
+## What Works vs What's Stubbed
+
+### Works (structurally complete)
+- Invariant config loading and Zod validation
+- Three-mode entry point (CLI/CI/Server) with env var config
+- InvariantEngine orchestration: search → assertion → violations
+- PR comment formatting with severity badges
+- GitHub Actions workflow with PR + schedule triggers
+- Slack message formatting with blocks and threaded violations
+- Slack @mention trigger handler
+
+### Stubbed/Incomplete
+- `SourcegraphClient.runAgent()` — real Agent SDK `query()` call is wired up, but JSON parsing of agent responses is fragile (regex extraction). Production would need structured output or tool-result parsing.
+- Slack scheduled scan in CI — the workflow just echoes; a real implementation would run a separate server-mode invocation or use a GitHub Action for Slack posting.
+- No retry/backoff on Sourcegraph or Slack API failures.
+- No caching of search results across invariants (could deduplicate Sourcegraph queries).
+- `@anthropic-ai/claude-code` import assumes the SDK exports `query` — actual API may differ slightly.
 
 ## Trade-offs
 
-1. **Sequential invariant checks vs parallel** — Chose sequential for simplicity. Could parallelize with `&` + `wait`, but error handling gets messy in bash. For 4-10 invariants at ~30s each, sequential is fine.
+| Decision | Pro | Con |
+|----------|-----|-----|
+| Agent SDK for Sourcegraph | Adaptive queries, reasoning over results | Slower, costlier, less deterministic than direct API |
+| Single process, three modes | Simple deployment, shared code | Server mode blocks on scan; would need worker threads for production |
+| Zod schema at runtime | Type-safe, good error messages | Extra dependency; could use JSON Schema directly |
+| Severity-based exit codes | CI fails on critical/high only | Teams might want configurable threshold |
 
-2. **Claude CLI per invariant vs single mega-prompt** — Per-invariant is more API calls but: isolated failures, clearer debugging, fits within max-turns budget. A mega-prompt risks running out of turns on complex invariants.
+## Self-Assessed Quality
 
-3. **Bash vs Python** — Bash is more portable (no runtime to install) but harder to maintain at scale. If this grows past ~10 invariants or needs conditional logic, rewrite the orchestrator in Python.
+**3/5** — Architecture is clear and the module boundaries are clean. The core verification loop is realistic. The Agent SDK integration is the weakest part — it works conceptually but the JSON parsing of free-form agent responses would need hardening. Good enough to validate the architecture and demonstrate the approach.
 
-4. **`yq` dependency** — Not always pre-installed. Could parse YAML with `grep`/`awk` but that's brittler than the dependency.
+## Estimated Effort to Production-Ready
 
-## File Inventory
-
-```
-invariants.yaml                                  — invariant definitions (~50 lines)
-mcp-config.json                                  — Sourcegraph MCP config (~10 lines)
-scripts/verify-invariants.sh                     — main orchestrator (~160 lines)
-scripts/post-slack.sh                            — Slack poster (~90 lines)
-scripts/post-github-comment.sh                   — GitHub PR commenter (~100 lines)
-.github/workflows/invariant-check-pr.yml         — PR trigger workflow (~55 lines)
-.github/workflows/invariant-check-scheduled.yml  — weekly cron workflow (~50 lines)
-```
-
-**Total: ~515 lines across 7 files**
-
-## Self-Assessed Quality: 4/5
-
-Strong prototype that demonstrates the full pipeline. Real bash with real error handling, real CLI flags, real webhook payloads. The main gap is end-to-end testing against a live Sourcegraph instance.
-
-## Estimated Effort to Production-Ready: 2-3 days
-
-- **Day 1:** Set up Sourcegraph test instance, verify MCP round-trip, fix JSON parsing edge cases
-- **Day 2:** Add retry logic, parallel execution, caching layer, and CLAUDE.md instructions
-- **Day 3:** Integration test suite, Slack payload testing, documentation, team onboarding
+**3-5 days** for a single engineer:
+- Day 1: Harden Agent SDK integration (structured outputs, error handling, retries)
+- Day 2: Real Slack bot testing, socket mode, thread management
+- Day 3: CI integration testing with actual Sourcegraph instance
+- Day 4: Add caching, parallel invariant checking, config hot-reload
+- Day 5: Monitoring, alerting, runbook, deploy to production
