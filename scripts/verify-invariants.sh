@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # verify-invariants.sh — Main orchestrator for cross-repo invariant verification.
 #
-# Reads invariants from YAML, constructs a prompt for each, calls claude CLI
+# Reads invariants from YAML, constructs a per-invariant prompt for Claude CLI
 # with Sourcegraph MCP, and outputs a JSON report to stdout.
+#
+# The agent instructions live in CLAUDE.md — this script constructs a minimal
+# per-invariant prompt that tells the agent WHAT to check, while CLAUDE.md
+# teaches it HOW to check (tool usage, assertion logic, output contract).
 #
 # Usage:
 #   ./scripts/verify-invariants.sh [options]
@@ -10,6 +14,7 @@
 # Options:
 #   -c FILE   Invariants config file (default: invariants.yaml)
 #   -m FILE   MCP config file (default: mcp-config.json)
+#   -s FILE   Schema file for validation (default: invariants.schema.json)
 #   -t N      Max turns per invariant check (default: 10)
 #   -v        Verbose mode (print progress to stderr)
 #
@@ -17,33 +22,36 @@
 #   SOURCEGRAPH_ENDPOINT — Sourcegraph instance URL
 #   SOURCEGRAPH_TOKEN    — Sourcegraph access token
 #
-# Output: JSON array of results to stdout
-#   [{ "id": "...", "status": "pass|fail|error", "violations": [...], "severity": "..." }]
+# Output: JSON report to stdout
+#   { "timestamp": "...", "summary": {...}, "results": [...] }
 
 set -euo pipefail
 
 # --- Defaults ---
-CONFIG_FILE="invariants.yaml"
-MCP_CONFIG="mcp-config.json"
-MAX_TURNS=10
-VERBOSE=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CONFIG_FILE="invariants.yaml"
+MCP_CONFIG="mcp-config.json"
+SCHEMA_FILE="invariants.schema.json"
+MAX_TURNS=10
+VERBOSE=false
 
 # --- Parse args ---
-while getopts "c:m:t:v" opt; do
+while getopts "c:m:s:t:v" opt; do
   case "$opt" in
     c) CONFIG_FILE="$OPTARG" ;;
     m) MCP_CONFIG="$OPTARG" ;;
+    s) SCHEMA_FILE="$OPTARG" ;;
     t) MAX_TURNS="$OPTARG" ;;
     v) VERBOSE=true ;;
-    *) echo "Usage: $0 [-c config] [-m mcp-config] [-t max-turns] [-v]" >&2; exit 1 ;;
+    *) echo "Usage: $0 [-c config] [-m mcp-config] [-s schema] [-t max-turns] [-v]" >&2; exit 1 ;;
   esac
 done
 
 # Resolve paths relative to repo root
 [[ "$CONFIG_FILE" != /* ]] && CONFIG_FILE="$REPO_ROOT/$CONFIG_FILE"
 [[ "$MCP_CONFIG" != /* ]] && MCP_CONFIG="$REPO_ROOT/$MCP_CONFIG"
+[[ "$SCHEMA_FILE" != /* ]] && SCHEMA_FILE="$REPO_ROOT/$SCHEMA_FILE"
 
 # --- Validate prerequisites ---
 for cmd in claude yq jq; do
@@ -68,6 +76,19 @@ if [[ -z "${SOURCEGRAPH_ENDPOINT:-}" || -z "${SOURCEGRAPH_TOKEN:-}" ]]; then
   exit 1
 fi
 
+# --- Validate config against JSON Schema (if ajv-cli available) ---
+if command -v ajv &>/dev/null && [[ -f "$SCHEMA_FILE" ]]; then
+  log_msg="Validating config against schema..."
+  if ! ajv validate -s "$SCHEMA_FILE" -d "$CONFIG_FILE" --spec=draft2020 2>/dev/null; then
+    echo "Error: invariants.yaml failed schema validation" >&2
+    echo "Run: ajv validate -s $SCHEMA_FILE -d $CONFIG_FILE" >&2
+    exit 1
+  fi
+  [[ "$VERBOSE" == "true" ]] && echo "[verify] Config passed schema validation" >&2
+elif [[ "$VERBOSE" == "true" ]]; then
+  echo "[verify] Skipping schema validation (ajv not installed)" >&2
+fi
+
 # --- Helper: log to stderr if verbose ---
 log() {
   if [[ "$VERBOSE" == "true" ]]; then
@@ -86,6 +107,7 @@ FAIL_COUNT=0
 ERROR_COUNT=0
 
 for i in $(seq 0 $((INVARIANT_COUNT - 1))); do
+  # Extract invariant fields
   INV_ID=$(yq -r ".invariants[$i].id" "$CONFIG_FILE")
   INV_DESC=$(yq -r ".invariants[$i].description" "$CONFIG_FILE")
   INV_SEVERITY=$(yq -r ".invariants[$i].severity" "$CONFIG_FILE")
@@ -98,40 +120,32 @@ for i in $(seq 0 $((INVARIANT_COUNT - 1))); do
 
   log "Checking [$((i+1))/$INVARIANT_COUNT]: $INV_ID ($INV_SEVERITY)"
 
-  # Build the prompt for Claude
+  # Build language filter line (only if set)
   LANG_FILTER=""
   if [[ -n "$INV_LANG" ]]; then
     LANG_FILTER="Filter results to language: $INV_LANG."
   fi
 
-  PROMPT="You are a cross-repo invariant verifier using Sourcegraph.
+  # Construct per-invariant prompt.
+  # CLAUDE.md teaches the agent HOW to verify; this prompt tells it WHAT to check.
+  PROMPT="Verify this cross-repo invariant using the instructions in CLAUDE.md.
 
-INVARIANT: $INV_DESC
-SEARCH PATTERN: $INV_SEARCH
-$LANG_FILTER
+INVARIANT: ${INV_ID}
+DESCRIPTION: ${INV_DESC}
+SEVERITY: ${INV_SEVERITY}
+
+SEARCH:
+  pattern: ${INV_SEARCH}
+  ${LANG_FILTER}
 
 ASSERTION:
-- Type: $INV_ASSERT_TYPE
-- Pattern: $INV_ASSERT_PATTERN
-- Scope: $INV_ASSERT_SCOPE
+  type: ${INV_ASSERT_TYPE}
+  pattern: ${INV_ASSERT_PATTERN}
+  scope: ${INV_ASSERT_SCOPE}
 
-INSTRUCTIONS:
-1. Use keyword_search to find files matching: $INV_SEARCH
-2. Based on the assertion type:
-   - must_contain: For each match (at $INV_ASSERT_SCOPE level), verify '$INV_ASSERT_PATTERN' also exists. Report any where it does NOT.
-   - must_not_contain: For each match (at $INV_ASSERT_SCOPE level), verify '$INV_ASSERT_PATTERN' does NOT exist. Report any where it DOES.
-   - must_not_exist: Any search match is itself a violation.
-3. Return ONLY a JSON object (no markdown, no explanation):
-{
-  \"status\": \"pass\" or \"fail\",
-  \"violations\": [
-    {\"repo\": \"owner/name\", \"file\": \"path/to/file\", \"line\": 42, \"detail\": \"short description\"}
-  ]
-}
-If no violations, return: {\"status\": \"pass\", \"violations\": []}
-If an error occurs, return: {\"status\": \"error\", \"violations\": [], \"error\": \"description\"}"
+Return ONLY a JSON object per the Output Contract in CLAUDE.md."
 
-  # Call claude CLI with Sourcegraph MCP
+  # Call claude CLI with Sourcegraph MCP (one call per invariant for isolation)
   CLAUDE_OUTPUT=""
   if CLAUDE_OUTPUT=$(echo "$PROMPT" | claude -p --bare \
     --mcp-config "$MCP_CONFIG" \
@@ -149,13 +163,11 @@ If an error occurs, return: {\"status\": \"error\", \"violations\": [], \"error\
       log "Warning: Could not parse Claude output for $INV_ID, treating as error"
       STATUS="error"
       VIOLATIONS="[]"
-      RESULT_JSON="{\"status\":\"error\",\"violations\":[],\"error\":\"unparseable response\"}"
     fi
   else
     log "Warning: Claude CLI failed for $INV_ID"
     STATUS="error"
     VIOLATIONS="[]"
-    RESULT_JSON="{\"status\":\"error\",\"violations\":[],\"error\":\"claude cli failed\"}"
   fi
 
   # Tally
@@ -172,12 +184,12 @@ If an error occurs, return: {\"status\": \"error\", \"violations\": [], \"error\
     --arg severity "$INV_SEVERITY" \
     --arg status "$STATUS" \
     --arg message "$INV_MESSAGE" \
-    --argjson violations "$VIOLATIONS" \
+    --argjson violations "${VIOLATIONS:-[]}" \
     '{id: $id, description: $desc, severity: $severity, status: $status, message: $message, violations: $violations}')
 
   RESULTS=$(echo "$RESULTS" | jq --argjson entry "$ENTRY" '. + [$entry]')
 
-  log "  → $STATUS ($(echo "$VIOLATIONS" | jq 'length') violations)"
+  log "  → $STATUS ($(echo "${VIOLATIONS:-[]}" | jq 'length') violations)"
 done
 
 # --- Build final report ---

@@ -35,6 +35,15 @@ jobs:
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code
 
+      - name: Validate invariants config
+        run: |
+          # Optional: validate against JSON Schema if ajv-cli is available
+          if npx ajv-cli validate -s invariants.schema.json -d invariants.yaml --spec=draft2020 2>/dev/null; then
+            echo "Config validation passed"
+          else
+            echo "::warning::Schema validation skipped or failed (non-blocking)"
+          fi
+
       - name: Verify cross-repo invariants
         id: verify
         env:
@@ -45,7 +54,6 @@ jobs:
           chmod +x scripts/verify-invariants.sh
           # Run verifier; capture output even on failure (exit 1 = violations found)
           scripts/verify-invariants.sh -v > report.json || true
-          echo "report_file=report.json" >> "$GITHUB_OUTPUT"
 
       - name: Post PR comment
         if: always() && steps.verify.outcome != 'cancelled'

@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cross-Repo Invariants Config",
+  "description": "Schema for invariants.yaml — defines cross-repo rules verified by Sourcegraph MCP.",
+  "type": "object",
+  "required": ["invariants"],
+  "additionalProperties": false,
+  "properties": {
+    "invariants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "description",
+          "severity",
+          "search",
+          "assertion",
+          "message"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "description": "Unique slug identifier for this invariant"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Human-readable rule description"
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low"],
+            "description": "Severity level — critical invariants are checked first"
+          },
+          "search": {
+            "type": "object",
+            "required": ["pattern"],
+            "additionalProperties": false,
+            "properties": {
+              "pattern": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Regex passed to Sourcegraph keyword_search"
+              },
+              "language": {
+                "type": "string",
+                "description": "Optional language filter (go, typescript, python, etc.)"
+              }
+            }
+          },
+          "assertion": {
+            "type": "object",
+            "required": ["type"],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["must_contain", "must_not_contain", "must_not_exist"],
+                "description": "Assertion type"
+              },
+              "pattern": {
+                "type": "string",
+                "description": "Regex for assertion check (unused when type=must_not_exist)"
+              },
+              "scope": {
+                "type": "string",
+                "enum": ["repo", "file"],
+                "default": "repo",
+                "description": "Check co-occurrence at repo or file level"
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": { "type": { "const": "must_contain" } }
+                },
+                "then": {
+                  "required": ["pattern", "scope"]
+                }
+              },
+              {
+                "if": {
+                  "properties": { "type": { "const": "must_not_contain" } }
+                },
+                "then": {
+                  "required": ["pattern", "scope"]
+                }
+              }
+            ]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Violation message shown to engineers"
+          }
+        }
+      }
+    }
+  }
+}

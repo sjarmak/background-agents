@@ -2,6 +2,8 @@
 # Each invariant declares a rule that must hold across all repositories.
 # The verifier reads these, constructs prompts, and uses Sourcegraph MCP to check them.
 #
+# Schema: invariants.schema.json (validate with: ajv validate -s invariants.schema.json -d invariants.yaml)
+#
 # Fields:
 #   id          — unique slug (used in reports)
 #   description — human-readable rule
