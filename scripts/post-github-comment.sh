@@ -33,7 +33,7 @@ fi
 REPORT=$(cat)
 
 # Parse summary
-TOTAL=$(echo "$REPORT" | jq -r '.summary.total')
+TOTAL=$(echo "$REPORT" | jq -r '.summary.total') || { echo "Error: failed to parse report JSON" >&2; exit 1; }
 PASSED=$(echo "$REPORT" | jq -r '.summary.passed')
 FAILED=$(echo "$REPORT" | jq -r '.summary.failed')
 ERRORS=$(echo "$REPORT" | jq -r '.summary.errors')
@@ -50,60 +50,69 @@ fi
 COMMENT+="| Invariant | Severity | Status | Violations |\n"
 COMMENT+="|-----------|----------|--------|------------|\n"
 
-RESULT_COUNT=$(echo "$REPORT" | jq '.results | length')
-for i in $(seq 0 $((RESULT_COUNT - 1))); do
-  STATUS=$(echo "$REPORT" | jq -r ".results[$i].status")
-  ID=$(echo "$REPORT" | jq -r ".results[$i].id")
-  SEVERITY=$(echo "$REPORT" | jq -r ".results[$i].severity")
-  VIOLATION_COUNT=$(echo "$REPORT" | jq ".results[$i].violations | length")
-
+# Build table rows in one jq call
+while IFS=$'\t' read -r ID SEVERITY STATUS VIOLATION_COUNT; do
   case "$STATUS" in
     pass) ICON=":white_check_mark:" ;;
     fail) ICON=":x:" ;;
     *)    ICON=":warning:" ;;
   esac
-
   COMMENT+="| \`$ID\` | $SEVERITY | $ICON $STATUS | $VIOLATION_COUNT |\n"
-done
+done < <(echo "$REPORT" | jq -r '.results[] | [.id, .severity, .status, (.violations | length | tostring)] | @tsv')
 
 # Add violation details if any
 if [[ "$FAILED" -gt 0 ]]; then
   COMMENT+="\n### Violations\n\n"
 
-  for i in $(seq 0 $((RESULT_COUNT - 1))); do
-    STATUS=$(echo "$REPORT" | jq -r ".results[$i].status")
-    [[ "$STATUS" != "fail" ]] && continue
-
-    ID=$(echo "$REPORT" | jq -r ".results[$i].id")
-    MESSAGE=$(echo "$REPORT" | jq -r ".results[$i].message")
-    COMMENT+="#### \`$ID\`\n"
-    COMMENT+="> $MESSAGE\n\n"
-
-    VIOLATION_COUNT=$(echo "$REPORT" | jq ".results[$i].violations | length")
-    LIMIT=$((VIOLATION_COUNT < 10 ? VIOLATION_COUNT : 10))
-
-    for j in $(seq 0 $((LIMIT - 1))); do
-      REPO_NAME=$(echo "$REPORT" | jq -r ".results[$i].violations[$j].repo")
-      FILE=$(echo "$REPORT" | jq -r ".results[$i].violations[$j].file")
-      LINE=$(echo "$REPORT" | jq -r ".results[$i].violations[$j].line")
-      DETAIL=$(echo "$REPORT" | jq -r ".results[$i].violations[$j].detail")
-      COMMENT+="- \`$REPO_NAME\` — [\`$FILE:$LINE\`](https://github.com/$REPO_NAME/blob/main/$FILE#L$LINE) — $DETAIL\n"
-    done
-
-    if [[ "$VIOLATION_COUNT" -gt 10 ]]; then
-      COMMENT+="\n_...and $((VIOLATION_COUNT - 10)) more violations_\n"
+  # Extract all violation details in one jq call
+  CURRENT_ID=""
+  OVERFLOW=""
+  while IFS=$'\t' read -r ID MESSAGE REPO_NAME FILE LINE DETAIL VCOUNT VINDEX; do
+    if [[ "$ID" != "$CURRENT_ID" ]]; then
+      # Close previous section overflow notice
+      if [[ -n "$CURRENT_ID" && -n "$OVERFLOW" ]]; then
+        COMMENT+="\n_...and $OVERFLOW more violations_\n"
+      fi
+      CURRENT_ID="$ID"
+      OVERFLOW=""
+      COMMENT+="#### \`$ID\`\n"
+      COMMENT+="> $MESSAGE\n\n"
     fi
-    COMMENT+="\n"
-  done
+    # Validate LINE is numeric; sanitize fields to prevent markdown injection
+    [[ "$LINE" =~ ^[0-9]+$ ]] || LINE="0"
+    # Escape backslashes first (before other substitutions), then markdown-breaking chars
+    DETAIL="${DETAIL//\\/\\\\}"
+    DETAIL="${DETAIL//\`/\\\`}"
+    DETAIL="${DETAIL//]/\\]}"
+    DETAIL="${DETAIL//)/\\)}"
+    FILE="${FILE//]/\\]}"
+    FILE="${FILE//)/\\)}"
+    REPO_NAME="${REPO_NAME//]/\\]}"
+    REPO_NAME="${REPO_NAME//)/\\)}"
+    COMMENT+="- \`$REPO_NAME\` — [\`$FILE:$LINE\`](https://github.com/$REPO_NAME/blob/main/$FILE#L$LINE) — $DETAIL\n"
+    # Track overflow for this result
+    if [[ "$VINDEX" == "9" && "$VCOUNT" -gt 10 ]]; then
+      OVERFLOW="$((VCOUNT - 10))"
+    fi
+  done < <(echo "$REPORT" | jq -r '
+    .results[] | select(.status == "fail") |
+    .id as $id | .message as $msg | (.violations | length) as $vc |
+    .violations[:10] | to_entries[] |
+    [$id, $msg, .value.repo, .value.file, (.value.line | tostring), .value.detail, ($vc | tostring), (.key | tostring)] | @tsv')
+  # Final overflow notice
+  if [[ -n "$CURRENT_ID" && -n "$OVERFLOW" ]]; then
+    COMMENT+="\n_...and $OVERFLOW more violations_\n"
+  fi
+  COMMENT+="\n"
 fi
 
 COMMENT+="\n---\n_Checked by Cross-Repo Invariant Verifier_"
 
 if [[ "$FORMAT_ONLY" == "true" ]]; then
   # Output formatted markdown to stdout
-  echo -e "$COMMENT"
+  printf '%b' "$COMMENT"
 else
   # Post comment using gh CLI
-  echo -e "$COMMENT" | gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file -
+  printf '%b' "$COMMENT" | gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file -
   echo "Posted comment to $REPO#$PR_NUMBER" >&2
 fi

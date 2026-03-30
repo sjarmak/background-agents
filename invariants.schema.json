@@ -74,24 +74,18 @@
                 "description": "Check co-occurrence at repo or file level"
               }
             },
-            "allOf": [
-              {
-                "if": {
-                  "properties": { "type": { "const": "must_contain" } }
-                },
-                "then": {
-                  "required": ["pattern", "scope"]
-                }
-              },
-              {
-                "if": {
-                  "properties": { "type": { "const": "must_not_contain" } }
-                },
-                "then": {
-                  "required": ["pattern", "scope"]
-                }
+            "if": {
+              "required": ["type"],
+              "properties": {
+                "type": { "enum": ["must_contain", "must_not_contain"] }
               }
-            ]
+            },
+            "then": {
+              "required": ["pattern", "scope"],
+              "properties": {
+                "pattern": { "minLength": 1 }
+              }
+            }
           },
           "message": {
             "type": "string",

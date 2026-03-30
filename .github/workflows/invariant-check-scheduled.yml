@@ -8,7 +8,7 @@ on:
 
 concurrency:
   group: invariant-check-scheduled
-  cancel-in-progress: true
+  cancel-in-progress: false  # must not cancel in-flight integrity checks
 
 permissions:
   contents: read
@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install yq
         run: |
@@ -52,7 +52,7 @@ jobs:
 
       - name: Upload report artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: invariant-report-${{ github.run_id }}
           path: report.json

@@ -2,7 +2,12 @@
   "mcpServers": {
     "sourcegraph": {
       "command": "npx",
-      "args": ["-y", "@nicepkg/sourcegraph-mcp@1.3.0"],
+      "args": [
+        "-y",
+        "--package",
+        "@nicepkg/sourcegraph-mcp@1.3.0",
+        "sourcegraph-mcp"
+      ],
       "env": {
         "SRC_ENDPOINT": "${SOURCEGRAPH_ENDPOINT}",
         "SRC_ACCESS_TOKEN": "${SOURCEGRAPH_TOKEN}"

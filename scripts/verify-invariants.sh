@@ -23,12 +23,18 @@
 # Environment:
 #   SOURCEGRAPH_ENDPOINT — Sourcegraph instance URL
 #   SOURCEGRAPH_TOKEN    — Sourcegraph access token
-#   MAX_COST_USD         — Maximum estimated cost in USD (default: 50)
+#   MAX_COST_USD         — Maximum estimated cost in USD (default: 10)
 #
 # Output: JSON report to stdout
 #   { "timestamp": "...", "summary": {...}, "results": [...] }
 
 set -euo pipefail
+
+# --- Require bash 4.3+ for wait -n ---
+if [[ "${BASH_VERSINFO[0]}" -lt 4 || ( "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -lt 3 ) ]]; then
+  echo "Error: bash 4.3+ required (found $BASH_VERSION)" >&2
+  exit 1
+fi
 
 # --- Defaults ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,6 +61,15 @@ while getopts "c:m:s:t:T:P:v" opt; do
   esac
 done
 
+# --- Validate numeric options ---
+for var_name in MAX_TURNS PER_TIMEOUT MAX_PARALLEL; do
+  val="${!var_name}"
+  if [[ ! "$val" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: -${var_name} requires a positive integer, got: $val" >&2
+    exit 1
+  fi
+done
+
 # Resolve paths relative to repo root
 [[ "$CONFIG_FILE" != /* ]] && CONFIG_FILE="$REPO_ROOT/$CONFIG_FILE"
 [[ "$MCP_CONFIG" != /* ]] && MCP_CONFIG="$REPO_ROOT/$MCP_CONFIG"
@@ -67,6 +82,9 @@ for cmd in claude yq jq python3 bc; do
     exit 1
   fi
 done
+if ! command -v ajv &>/dev/null; then
+  echo "Warning: 'ajv' not found — schema validation will be skipped" >&2
+fi
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
   echo "Error: Config file not found: $CONFIG_FILE" >&2
@@ -83,46 +101,59 @@ if [[ -z "${SOURCEGRAPH_ENDPOINT:-}" || -z "${SOURCEGRAPH_TOKEN:-}" ]]; then
   exit 1
 fi
 
-# --- Validate config against JSON Schema (if ajv-cli available) ---
+# --- Validate config against JSON Schema ---
 if command -v ajv &>/dev/null && [[ -f "$SCHEMA_FILE" ]]; then
-  log_msg="Validating config against schema..."
   if ! ajv validate -s "$SCHEMA_FILE" -d "$CONFIG_FILE" --spec=draft2020 2>/dev/null; then
     echo "Error: invariants.yaml failed schema validation" >&2
     echo "Run: ajv validate -s $SCHEMA_FILE -d $CONFIG_FILE" >&2
     exit 1
   fi
   [[ "$VERBOSE" == "true" ]] && echo "[verify] Config passed schema validation" >&2
-elif [[ "$VERBOSE" == "true" ]]; then
-  echo "[verify] Skipping schema validation (ajv not installed)" >&2
+else
+  echo "Warning: schema file not found at $SCHEMA_FILE — skipping validation" >&2
 fi
 
-# --- Helper: log to stderr if verbose ---
+# --- Helpers ---
 log() {
   if [[ "$VERBOSE" == "true" ]]; then
     echo "[verify] $*" >&2
   fi
 }
 
+emit_canary_error() {
+  local msg="$1"
+  echo "Error: $msg" >&2
+  jq -n --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg error "$msg" \
+    '{timestamp: $timestamp,
+      summary: {total: 0, checked: 0, passed: 0, failed: 0, errors: 1, skipped: 0, timeouts: 0},
+      complete: false, results: [], error: $error}'
+  exit 1
+}
+
 # --- Read invariant count ---
 INVARIANT_COUNT=$(yq '.invariants | length' "$CONFIG_FILE")
 log "Found $INVARIANT_COUNT invariants to verify"
 
-# --- Mod 7: Empty config guard ---
+# --- Empty config guard ---
 if [[ "$INVARIANT_COUNT" -eq 0 ]]; then
   echo "Error: No invariants found in $CONFIG_FILE" >&2
   exit 1
 fi
 
-# --- Mod 5: Cost estimation ---
+# --- Cost guard ---
+MAX_COST="${MAX_COST_USD:-10}"
+if [[ -n "$MAX_COST" && ! "$MAX_COST" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "Error: MAX_COST_USD must be a number, got: $MAX_COST" >&2
+  exit 1
+fi
 ESTIMATED_COST=$(echo "$INVARIANT_COUNT * 1.5" | bc)
-MAX_COST="${MAX_COST_USD:-50}"
 if (( $(echo "$ESTIMATED_COST > $MAX_COST" | bc -l) )); then
   echo "Error: Estimated cost \$$ESTIMATED_COST exceeds budget \$$MAX_COST" >&2
   exit 1
 fi
 log "Estimated cost: \$$ESTIMATED_COST (budget: \$$MAX_COST)"
 
-# --- Mod 6: Sourcegraph circuit breaker ---
+# --- Sourcegraph circuit breaker ---
 log "Running Sourcegraph connectivity check..."
 SG_CANARY_OUTPUT=""
 if ! SG_CANARY_OUTPUT=$(timeout 10 claude -p --bare \
@@ -139,37 +170,45 @@ if [[ -z "$SG_CANARY_OUTPUT" ]]; then
 fi
 log "Sourcegraph connectivity check passed"
 
-# --- Mod 1: Canary invariant detection ---
-# Collect canary invariant indices for post-verification validation
+# --- Pre-parse all invariants from YAML once ---
+INVARIANTS_JSON=$(yq -o=json '.invariants' "$CONFIG_FILE")
+
+# Detect canary invariants and collect all IDs
 CANARY_IDS=()
+INV_IDS=()
 for i in $(seq 0 $((INVARIANT_COUNT - 1))); do
-  INV_ID=$(yq -r ".invariants[$i].id" "$CONFIG_FILE")
-  if [[ "$INV_ID" == canary-* ]]; then
-    CANARY_IDS+=("$INV_ID")
-    log "Detected canary invariant: $INV_ID"
+  _id=$(echo "$INVARIANTS_JSON" | jq -r ".[$i].id")
+  INV_IDS+=("$_id")
+  if [[ "$_id" == canary-* ]]; then
+    CANARY_IDS+=("$_id")
+    log "Detected canary invariant: $_id"
   fi
 done
 
-# --- Mod 4: Parallel execution setup ---
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
+# --- Parallel execution setup ---
+WORK_DIR=$(mktemp -d)
+trap 'kill -- -$$ 2>/dev/null; rm -rf "$WORK_DIR"' EXIT INT TERM
 
 # Write per-invariant prompts and spawn background jobs
 log "Launching invariant checks (max $MAX_PARALLEL parallel)..."
 
-ACTIVE_JOBS=0
-
 for i in $(seq 0 $((INVARIANT_COUNT - 1))); do
-  # Extract invariant fields
-  INV_ID=$(yq -r ".invariants[$i].id" "$CONFIG_FILE")
-  INV_DESC=$(yq -r ".invariants[$i].description" "$CONFIG_FILE")
-  INV_SEVERITY=$(yq -r ".invariants[$i].severity" "$CONFIG_FILE")
-  INV_SEARCH=$(yq -r ".invariants[$i].search.pattern" "$CONFIG_FILE")
-  INV_LANG=$(yq -r ".invariants[$i].search.language // \"\"" "$CONFIG_FILE")
-  INV_ASSERT_TYPE=$(yq -r ".invariants[$i].assertion.type" "$CONFIG_FILE")
-  INV_ASSERT_PATTERN=$(yq -r ".invariants[$i].assertion.pattern // \"\"" "$CONFIG_FILE")
-  INV_ASSERT_SCOPE=$(yq -r ".invariants[$i].assertion.scope // \"repo\"" "$CONFIG_FILE")
-  INV_MESSAGE=$(yq -r ".invariants[$i].message" "$CONFIG_FILE")
+  # Extract all fields via discrete jq calls against pre-parsed JSON
+  INV_ID=$(echo "$INVARIANTS_JSON" | jq -r ".[$i].id") || { echo "Error: failed to parse invariant $i" >&2; exit 1; }
+  INV_DESC=$(echo "$INVARIANTS_JSON" | jq -r ".[$i].description")
+  INV_SEVERITY=$(echo "$INVARIANTS_JSON" | jq -r ".[$i].severity")
+  INV_SEARCH=$(echo "$INVARIANTS_JSON" | jq -r ".[$i].search.pattern")
+  INV_LANG=$(echo "$INVARIANTS_JSON" | jq -r ".[$i].search.language // \"\"")
+  INV_ASSERT_TYPE=$(echo "$INVARIANTS_JSON" | jq -r ".[$i].assertion.type")
+  INV_ASSERT_PATTERN=$(echo "$INVARIANTS_JSON" | jq -r ".[$i].assertion.pattern // \"\"")
+  INV_ASSERT_SCOPE=$(echo "$INVARIANTS_JSON" | jq -r ".[$i].assertion.scope // \"repo\"")
+  INV_MESSAGE=$(echo "$INVARIANTS_JSON" | jq -r ".[$i].message")
+
+  # Validate INV_ID matches schema contract: lowercase, digits, hyphens
+  if [[ ! "$INV_ID" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    echo "Error: invariant id '$INV_ID' contains illegal characters (must match ^[a-z][a-z0-9-]*$)" >&2
+    exit 1
+  fi
 
   log "Spawning [$((i+1))/$INVARIANT_COUNT]: $INV_ID ($INV_SEVERITY)"
 
@@ -180,7 +219,7 @@ for i in $(seq 0 $((INVARIANT_COUNT - 1))); do
   fi
 
   # Write prompt to temp file
-  cat > "$TMPDIR/prompt-$INV_ID.txt" <<PROMPT_EOF
+  cat > "$WORK_DIR/prompt-$INV_ID.txt" <<PROMPT_EOF
 Verify this cross-repo invariant using the instructions in CLAUDE.md.
 
 INVARIANT: ${INV_ID}
@@ -206,9 +245,14 @@ PROMPT_EOF
     --arg severity "$INV_SEVERITY" \
     --arg message "$INV_MESSAGE" \
     '{id: $id, description: $desc, severity: $severity, message: $message}' \
-    > "$TMPDIR/meta-$INV_ID.json"
+    > "$WORK_DIR/meta-$INV_ID.json"
 
-  # Spawn background job with timeout (Mod 3)
+  # Semaphore — wait for a slot before spawning
+  while [[ $(jobs -rp | wc -l) -ge "$MAX_PARALLEL" ]]; do
+    wait -n
+  done
+
+  # Spawn background job with timeout
   (
     CLAUDE_OUTPUT=""
     TIMED_OUT=false
@@ -216,7 +260,7 @@ PROMPT_EOF
       --mcp-config "$MCP_CONFIG" \
       --max-turns "$MAX_TURNS" \
       --allowedTools "mcp__sourcegraph__keyword_search,mcp__sourcegraph__find_references,mcp__sourcegraph__read_file" \
-      < "$TMPDIR/prompt-$INV_ID.txt" \
+      < "$WORK_DIR/prompt-$INV_ID.txt" \
       2>/dev/null); then
       :
     else
@@ -227,9 +271,9 @@ PROMPT_EOF
     fi
 
     if [[ "$TIMED_OUT" == "true" ]]; then
-      echo '{"status":"timeout","violations":[]}' > "$TMPDIR/result-$INV_ID.json"
+      echo '{"status":"timeout","violations":[]}' > "$WORK_DIR/result-$INV_ID.json"
     elif [[ -n "$CLAUDE_OUTPUT" ]]; then
-      # Extract JSON from Claude's response
+      # Claude may prepend prose before the JSON despite the output contract — scan for first valid object
       RESULT_JSON=$(python3 -c '
 import sys, json
 raw = sys.stdin.read()
@@ -253,22 +297,14 @@ print("")
 ' <<< "$CLAUDE_OUTPUT" 2>/dev/null || echo "")
 
       if [[ -n "$RESULT_JSON" ]] && echo "$RESULT_JSON" | jq . &>/dev/null; then
-        echo "$RESULT_JSON" > "$TMPDIR/result-$INV_ID.json"
+        echo "$RESULT_JSON" > "$WORK_DIR/result-$INV_ID.json"
       else
-        echo '{"status":"error","violations":[]}' > "$TMPDIR/result-$INV_ID.json"
+        echo '{"status":"error","violations":[]}' > "$WORK_DIR/result-$INV_ID.json"
       fi
     else
-      echo '{"status":"error","violations":[]}' > "$TMPDIR/result-$INV_ID.json"
+      echo '{"status":"error","violations":[]}' > "$WORK_DIR/result-$INV_ID.json"
     fi
   ) &
-
-  ACTIVE_JOBS=$((ACTIVE_JOBS + 1))
-
-  # Mod 4: Semaphore — wait for a slot when at concurrency cap
-  if [[ "$ACTIVE_JOBS" -ge "$MAX_PARALLEL" ]]; then
-    wait -n 2>/dev/null || true
-    ACTIVE_JOBS=$((ACTIVE_JOBS - 1))
-  fi
 done
 
 # Wait for all remaining background jobs
@@ -277,7 +313,6 @@ wait
 # --- Merge results ---
 log "All jobs complete. Merging results..."
 
-RESULTS="[]"
 PASS_COUNT=0
 FAIL_COUNT=0
 ERROR_COUNT=0
@@ -285,72 +320,49 @@ TIMEOUT_COUNT=0
 CHECKED_COUNT=0
 SKIPPED_COUNT=0
 
-for i in $(seq 0 $((INVARIANT_COUNT - 1))); do
-  INV_ID=$(yq -r ".invariants[$i].id" "$CONFIG_FILE")
-
-  RESULT_FILE="$TMPDIR/result-$INV_ID.json"
-  META_FILE="$TMPDIR/meta-$INV_ID.json"
+# Build merged result files for single-pass jq merge
+RESULT_FILES=()
+for INV_ID in "${INV_IDS[@]}"; do
+  RESULT_FILE="$WORK_DIR/result-$INV_ID.json"
+  META_FILE="$WORK_DIR/meta-$INV_ID.json"
 
   if [[ ! -f "$RESULT_FILE" ]]; then
     log "Warning: No result file for $INV_ID, marking as skipped"
     SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
-
-    ENTRY=$(jq -n \
-      --slurpfile meta "$META_FILE" \
-      '$meta[0] + {status: "skipped", violations: []}')
-    RESULTS=$(echo "$RESULTS" | jq --argjson entry "$ENTRY" '. + [$entry]')
-    continue
+    echo '{"status":"skipped","violations":[]}' > "$RESULT_FILE"
+  else
+    CHECKED_COUNT=$((CHECKED_COUNT + 1))
+    STATUS=$(jq -r '.status' "$RESULT_FILE")
+    case "$STATUS" in
+      pass)    PASS_COUNT=$((PASS_COUNT + 1)) ;;
+      fail)    FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+      timeout) TIMEOUT_COUNT=$((TIMEOUT_COUNT + 1)) ;;
+      *)       ERROR_COUNT=$((ERROR_COUNT + 1)) ;;
+    esac
+    log "  $INV_ID → $STATUS ($(jq '.violations | length' "$RESULT_FILE") violations)"
   fi
 
-  CHECKED_COUNT=$((CHECKED_COUNT + 1))
-
-  STATUS=$(jq -r '.status' "$RESULT_FILE")
-  VIOLATIONS=$(jq '.violations' "$RESULT_FILE")
-
-  # Tally
-  case "$STATUS" in
-    pass)    PASS_COUNT=$((PASS_COUNT + 1)) ;;
-    fail)    FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
-    timeout) TIMEOUT_COUNT=$((TIMEOUT_COUNT + 1)) ;;
-    *)       ERROR_COUNT=$((ERROR_COUNT + 1)) ;;
-  esac
-
-  # Build result entry by merging metadata with result
-  ENTRY=$(jq -n \
-    --slurpfile meta "$META_FILE" \
-    --arg status "$STATUS" \
-    --argjson violations "${VIOLATIONS:-[]}" \
-    '$meta[0] + {status: $status, violations: $violations}')
-
-  RESULTS=$(echo "$RESULTS" | jq --argjson entry "$ENTRY" '. + [$entry]')
-
-  log "  $INV_ID → $STATUS ($(echo "${VIOLATIONS:-[]}" | jq 'length') violations)"
+  # Merge meta + result into a combined file
+  jq -s '.[0] + .[1]' "$META_FILE" "$RESULT_FILE" > "$WORK_DIR/merged-$INV_ID.json"
+  RESULT_FILES+=("$WORK_DIR/merged-$INV_ID.json")
 done
 
-# --- Mod 1: Canary validation ---
+# Single jq call to produce the results array
+RESULTS=$(jq -s '.' "${RESULT_FILES[@]}")
+
+# --- Canary validation ---
 for CANARY_ID in "${CANARY_IDS[@]}"; do
-  CANARY_RESULT_FILE="$TMPDIR/result-$CANARY_ID.json"
-  if [[ -f "$CANARY_RESULT_FILE" ]]; then
-    CANARY_STATUS=$(jq -r '.status' "$CANARY_RESULT_FILE")
-    if [[ "$CANARY_STATUS" == "pass" ]]; then
-      echo "Error: Canary invariant '$CANARY_ID' returned 'pass' — the guaranteed violation was NOT detected. Verification pipeline is broken." >&2
-      # Output error report
-      jq -n \
-        --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        --arg error "Canary invariant '$CANARY_ID' passed unexpectedly — pipeline integrity compromised" \
-        '{
-          timestamp: $timestamp,
-          summary: {total: 0, checked: 0, passed: 0, failed: 0, errors: 1, skipped: 0, timeouts: 0},
-          complete: false,
-          results: [],
-          error: $error
-        }'
-      exit 1
-    fi
+  CANARY_RESULT_FILE="$WORK_DIR/result-$CANARY_ID.json"
+  if [[ ! -f "$CANARY_RESULT_FILE" ]]; then
+    emit_canary_error "Canary invariant '$CANARY_ID' produced no result — pipeline integrity unknown"
+  fi
+  CANARY_STATUS=$(jq -r '.status' "$CANARY_RESULT_FILE")
+  if [[ "$CANARY_STATUS" == "pass" ]]; then
+    emit_canary_error "Canary invariant '$CANARY_ID' passed unexpectedly — pipeline integrity compromised"
   fi
 done
 
-# --- Mod 2: Completeness tracking ---
+# --- Completeness tracking ---
 IS_COMPLETE=true
 if [[ "$CHECKED_COUNT" -lt "$INVARIANT_COUNT" ]]; then
   IS_COMPLETE=false

@@ -67,18 +67,14 @@ GitHub Actions (cron / PR trigger)
 
 ## 3. Emergency Disable
 
-### Option A: Disable via workflow_dispatch
-
-If the workflow supports a `disable` input, trigger it manually from the Actions tab.
-
-### Option B: Comment out triggers
+### Option A: Comment out triggers
 
 Edit the workflow YAML and comment out the `on:` triggers:
 
 ```yaml
 # on:
 #   schedule:
-#     - cron: '0 8 * * 1'
+#     - cron: '0 9 * * 1'
 #   pull_request:
 #     paths:
 #       - 'invariants.yaml'
@@ -86,7 +82,7 @@ Edit the workflow YAML and comment out the `on:` triggers:
 
 Push the change to disable all automated runs. Revert when ready to re-enable.
 
-### Option C: Remove the schedule
+### Option B: Remove the schedule
 
 Delete or rename the workflow file. This is the most aggressive option — use only if the system is causing active harm (e.g., spamming Slack, burning API budget).
 

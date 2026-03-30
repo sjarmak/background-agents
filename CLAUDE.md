@@ -10,7 +10,7 @@ You are verifying cross-repo invariants using Sourcegraph MCP tools.
 
 ## How to Verify Invariants
 
-Each invariant in `invariants.json` has this structure:
+Each invariant in `invariants.yaml` has this structure:
 
 ```json
 {
