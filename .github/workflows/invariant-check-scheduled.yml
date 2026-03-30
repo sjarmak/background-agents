@@ -40,8 +40,8 @@ jobs:
       - name: Verify cross-repo invariants
         id: verify
         env:
-          SOURCEGRAPH_ENDPOINT: ${{ secrets.SOURCEGRAPH_ENDPOINT }}
-          SOURCEGRAPH_TOKEN: ${{ secrets.SOURCEGRAPH_TOKEN }}
+          SOURCEGRAPH_URL: ${{ secrets.SOURCEGRAPH_URL }}
+          SRC_ACCESS_TOKEN: ${{ secrets.SRC_ACCESS_TOKEN }}
         run: |
           chmod +x scripts/verify-invariants.sh
           scripts/verify-invariants.sh -v > report.json || true

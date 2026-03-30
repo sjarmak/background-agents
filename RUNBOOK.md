@@ -56,13 +56,13 @@ GitHub Actions (cron / PR trigger)
    - Check Sourcegraph connectivity if the canary didn't fire
 
 4. **Check Sourcegraph health**
-   - Verify the Sourcegraph instance is reachable at `$SOURCEGRAPH_ENDPOINT`
+   - Verify the Sourcegraph instance is reachable at `$SOURCEGRAPH_URL`
    - Check that repository indexing is up to date
    - Look for recent Sourcegraph incidents or maintenance windows
 
 5. **Check API key validity**
    - Verify Claude OAuth credentials are valid: check `CLAUDE_OAUTH_CREDENTIALS` secret contains a valid `claudeAiOauth` JSON with non-expired tokens
-   - Verify `SOURCEGRAPH_TOKEN` hasn't expired: test with a manual API call
+   - Verify `SRC_ACCESS_TOKEN` hasn't expired: test with a manual API call
    - Check `SLACK_WEBHOOK_URL` is still active if Slack notifications are missing
 
 ## 3. Emergency Disable
@@ -91,8 +91,8 @@ Delete or rename the workflow file. This is the most aggressive option — use o
 | Secret                     | Stored In           | How to Rotate                                                                                                                                                                    |
 | -------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CLAUDE_OAUTH_CREDENTIALS` | GitHub repo secrets | JSON contents of `~/.claude/.credentials.json` with `claudeAiOauth` object (accessToken, refreshToken, expiresAt). Copy from a machine with an active Claude subscription login. |
-| `SOURCEGRAPH_ENDPOINT`     | GitHub repo secrets | Update if the Sourcegraph instance URL changes.                                                                                                                                  |
-| `SOURCEGRAPH_TOKEN`        | GitHub repo secrets | Generate new token in Sourcegraph > User Settings > Access Tokens. Update in repo secrets.                                                                                       |
+| `SOURCEGRAPH_URL`          | GitHub repo secrets | Sourcegraph instance URL (e.g., `https://sourcegraph.sourcegraph.com`). Update if instance changes.                                                                              |
+| `SRC_ACCESS_TOKEN`         | GitHub repo secrets | Generate new token in Sourcegraph > User Settings > Access Tokens. Update in repo secrets.                                                                                       |
 | `SLACK_WEBHOOK_URL`        | GitHub repo secrets | Create new webhook in Slack > App Settings > Incoming Webhooks. Update in repo secrets. Delete old webhook.                                                                      |
 
 After rotating any secret:
@@ -119,39 +119,19 @@ After rotating any secret:
 - Choose the narrowest `scope` (`file` over `repo`) when possible
 - Write actionable `message` text — engineers should know what to fix
 
-## 6. Cost Management
-
-### Expected Cost per Run
-
-- Each invariant requires 1-3 Sourcegraph searches + 0-N file reads
-- Claude API cost depends on the number of invariants and search result volume
-- Typical run with 5 invariants: ~$0.50-$2.00 in API costs
-
-### Controlling Costs
-
-- **`MAX_COST_USD` env var** — set in the workflow to cap per-run spending (e.g., `MAX_COST_USD=5`)
-- **Reduce invariant count** — fewer invariants = fewer searches = lower cost
-- **Use language filters** — narrows search scope, reduces tokens processed
-- **Monitor usage** — check the [Anthropic dashboard](https://console.anthropic.com/) for spend trends
-
-### Budget Alerts
-
-Set up billing alerts in the Anthropic console to get notified before hitting spend limits.
-
-## 7. Common Failure Modes
+## 6. Common Failure Modes
 
 | Symptom                                | Likely Cause                                                                | Fix                                                                                               |
 | -------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | Canary invariant passes (no violation) | Sourcegraph search is broken or canary marker was removed from fixture repo | Check Sourcegraph health; verify `canary-test-fixture` repo contains the marker                   |
-| All invariants return zero results     | Sourcegraph token expired or endpoint unreachable                           | Rotate `SOURCEGRAPH_TOKEN`; check endpoint URL                                                    |
+| All invariants return zero results     | Sourcegraph token expired or endpoint unreachable                           | Rotate `SRC_ACCESS_TOKEN`; check endpoint URL                                                     |
 | Run times out                          | Too many search results or Sourcegraph is slow                              | Add language filters; reduce invariant count; check Sourcegraph performance                       |
 | `"status": "error"` in report          | API key invalid, network error, or schema validation failure                | Check CI logs for the specific error message; verify secrets                                      |
 | Slack notification missing             | Webhook URL invalid or Slack app deactivated                                | Test webhook manually with `curl`; regenerate if needed                                           |
 | Schema validation fails                | `invariants.yaml` doesn't match `invariants.schema.json`                    | Run `ajv validate` locally; check for typos, missing required fields, or exceeding `maxItems: 20` |
-| Cost spike                             | New invariant with broad search pattern                                     | Review search patterns; add language filters; set `MAX_COST_USD` cap                              |
 | Duplicate/stale violations             | Sourcegraph index is behind                                                 | Check indexing status; wait for re-index or trigger manually                                      |
 
-## 8. Ownership
+## 7. Ownership
 
 | Role              | Contact                                            |
 | ----------------- | -------------------------------------------------- |

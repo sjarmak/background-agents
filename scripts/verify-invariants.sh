@@ -21,9 +21,8 @@
 #   -v        Verbose mode (print progress to stderr)
 #
 # Environment:
-#   SOURCEGRAPH_ENDPOINT — Sourcegraph instance URL
-#   SOURCEGRAPH_TOKEN    — Sourcegraph access token
-#   MAX_COST_USD         — Maximum estimated cost in USD (default: 10)
+#   SOURCEGRAPH_URL      — Sourcegraph instance URL
+#   SRC_ACCESS_TOKEN     — Sourcegraph access token
 #
 # Output: JSON report to stdout
 #   { "timestamp": "...", "summary": {...}, "results": [...] }
@@ -76,7 +75,7 @@ done
 [[ "$SCHEMA_FILE" != /* ]] && SCHEMA_FILE="$REPO_ROOT/$SCHEMA_FILE"
 
 # --- Validate prerequisites ---
-for cmd in claude yq jq python3 bc; do
+for cmd in claude yq jq python3; do
   if ! command -v "$cmd" &>/dev/null; then
     echo "Error: '$cmd' is required but not found in PATH" >&2
     exit 1
@@ -96,8 +95,8 @@ if [[ ! -f "$MCP_CONFIG" ]]; then
   exit 1
 fi
 
-if [[ -z "${SOURCEGRAPH_ENDPOINT:-}" || -z "${SOURCEGRAPH_TOKEN:-}" ]]; then
-  echo "Error: SOURCEGRAPH_ENDPOINT and SOURCEGRAPH_TOKEN must be set" >&2
+if [[ -z "${SOURCEGRAPH_URL:-}" || -z "${SRC_ACCESS_TOKEN:-}" ]]; then
+  echo "Error: SOURCEGRAPH_URL and SRC_ACCESS_TOKEN must be set" >&2
   exit 1
 fi
 
@@ -140,25 +139,12 @@ if [[ "$INVARIANT_COUNT" -eq 0 ]]; then
   exit 1
 fi
 
-# --- Cost guard ---
-MAX_COST="${MAX_COST_USD:-10}"
-if [[ -n "$MAX_COST" && ! "$MAX_COST" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-  echo "Error: MAX_COST_USD must be a number, got: $MAX_COST" >&2
-  exit 1
-fi
-ESTIMATED_COST=$(echo "$INVARIANT_COUNT * 1.5" | bc)
-if (( $(echo "$ESTIMATED_COST > $MAX_COST" | bc -l) )); then
-  echo "Error: Estimated cost \$$ESTIMATED_COST exceeds budget \$$MAX_COST" >&2
-  exit 1
-fi
-log "Estimated cost: \$$ESTIMATED_COST (budget: \$$MAX_COST)"
-
 # --- Sourcegraph circuit breaker ---
 log "Running Sourcegraph connectivity check..."
 SG_CANARY_OUTPUT=""
 if ! SG_CANARY_OUTPUT=$(timeout 10 claude -p --bare \
   --mcp-config "$MCP_CONFIG" \
-  --allowedTools "mcp__sourcegraph__keyword_search" \
+  --allowedTools "mcp__sourcegraph__sg_keyword_search" \
   "Search for 'main' using keyword_search. Return {\"status\":\"ok\"} if search works." \
   2>/dev/null); then
   echo "Error: Sourcegraph unreachable — circuit breaker tripped (claude call failed)" >&2
@@ -259,7 +245,7 @@ PROMPT_EOF
     if CLAUDE_OUTPUT=$(timeout "$PER_TIMEOUT" claude -p --bare \
       --mcp-config "$MCP_CONFIG" \
       --max-turns "$MAX_TURNS" \
-      --allowedTools "mcp__sourcegraph__keyword_search,mcp__sourcegraph__find_references,mcp__sourcegraph__read_file" \
+      --allowedTools "mcp__sourcegraph__sg_keyword_search,mcp__sourcegraph__sg_find_references,mcp__sourcegraph__sg_read_file" \
       < "$WORK_DIR/prompt-$INV_ID.txt" \
       2>/dev/null); then
       :

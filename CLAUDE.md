@@ -4,9 +4,9 @@ You are verifying cross-repo invariants using Sourcegraph MCP tools.
 
 ## Available Tools
 
-- `mcp__sourcegraph__keyword_search` — Search code across all indexed repositories
-- `mcp__sourcegraph__find_references` — Find all references to a symbol across repos
-- `mcp__sourcegraph__read_file` — Read a specific file from any indexed repository
+- `mcp__sourcegraph__sg_keyword_search` — Search code across all indexed repositories
+- `mcp__sourcegraph__sg_find_references` — Find all references to a symbol across repos
+- `mcp__sourcegraph__sg_read_file` — Read a specific file from any indexed repository
 
 ## How to Verify Invariants
 
