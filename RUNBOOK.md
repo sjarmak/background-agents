@@ -61,7 +61,7 @@ GitHub Actions (cron / PR trigger)
    - Look for recent Sourcegraph incidents or maintenance windows
 
 5. **Check API key validity**
-   - Verify `ANTHROPIC_API_KEY` is valid: check the Anthropic dashboard for usage/errors
+   - Verify Claude OAuth credentials are valid: check `CLAUDE_OAUTH_CREDENTIALS` secret contains a valid `claudeAiOauth` JSON with non-expired tokens
    - Verify `SOURCEGRAPH_TOKEN` hasn't expired: test with a manual API call
    - Check `SLACK_WEBHOOK_URL` is still active if Slack notifications are missing
 
@@ -88,12 +88,12 @@ Delete or rename the workflow file. This is the most aggressive option — use o
 
 ## 4. Secret Rotation
 
-| Secret                 | Stored In           | How to Rotate                                                                                               |
-| ---------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `ANTHROPIC_API_KEY`    | GitHub repo secrets | Generate new key at console.anthropic.com > API Keys. Update in repo Settings > Secrets > Actions.          |
-| `SOURCEGRAPH_ENDPOINT` | GitHub repo secrets | Update if the Sourcegraph instance URL changes.                                                             |
-| `SOURCEGRAPH_TOKEN`    | GitHub repo secrets | Generate new token in Sourcegraph > User Settings > Access Tokens. Update in repo secrets.                  |
-| `SLACK_WEBHOOK_URL`    | GitHub repo secrets | Create new webhook in Slack > App Settings > Incoming Webhooks. Update in repo secrets. Delete old webhook. |
+| Secret                     | Stored In           | How to Rotate                                                                                                                                                                    |
+| -------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE_OAUTH_CREDENTIALS` | GitHub repo secrets | JSON contents of `~/.claude/.credentials.json` with `claudeAiOauth` object (accessToken, refreshToken, expiresAt). Copy from a machine with an active Claude subscription login. |
+| `SOURCEGRAPH_ENDPOINT`     | GitHub repo secrets | Update if the Sourcegraph instance URL changes.                                                                                                                                  |
+| `SOURCEGRAPH_TOKEN`        | GitHub repo secrets | Generate new token in Sourcegraph > User Settings > Access Tokens. Update in repo secrets.                                                                                       |
+| `SLACK_WEBHOOK_URL`        | GitHub repo secrets | Create new webhook in Slack > App Settings > Incoming Webhooks. Update in repo secrets. Delete old webhook.                                                                      |
 
 After rotating any secret:
 

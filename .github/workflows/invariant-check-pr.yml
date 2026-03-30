@@ -65,10 +65,14 @@ jobs:
             echo "::warning::Schema validation skipped or failed (non-blocking)"
           fi
 
+      - name: Setup Claude OAuth credentials
+        run: |
+          mkdir -p ~/.claude
+          echo '${{ secrets.CLAUDE_OAUTH_CREDENTIALS }}' > ~/.claude/.credentials.json
+
       - name: Verify cross-repo invariants
         id: verify
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SOURCEGRAPH_ENDPOINT: ${{ secrets.SOURCEGRAPH_ENDPOINT }}
           SOURCEGRAPH_TOKEN: ${{ secrets.SOURCEGRAPH_TOKEN }}
         run: |
