@@ -1,6 +1,21 @@
 {
   "invariants": [
     {
+      "id": "canary-verification-active",
+      "description": "CANARY: This synthetic invariant must always detect a violation. It searches for 'Licensed under the Apache License' which reliably exists in open-source repos. If it passes (zero matches), the Sourcegraph connection or search is broken.",
+      "severity": "critical",
+      "search": {
+        "pattern": "Licensed under the Apache License",
+        "language": null
+      },
+      "assertion": {
+        "type": "must_not_exist",
+        "pattern": null,
+        "scope": "repo"
+      },
+      "message": "CANARY OK — this violation is expected and confirms the pipeline is working"
+    },
+    {
       "id": "auth-init-required",
       "description": "Every service importing auth-lib MUST call auth.init() in its entrypoint",
       "severity": "critical",

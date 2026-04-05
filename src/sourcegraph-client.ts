@@ -1,14 +1,18 @@
 /**
- * Reusable Sourcegraph MCP client.
+ * Reusable Sourcegraph client.
  *
- * Wraps Claude Agent SDK invocations with the Sourcegraph MCP server.
- * Designed for reuse by future agents (Merge Conflict Predictor,
- * Dependency Impact Oracle).
+ * Two backends:
+ *   - SourcegraphGraphQLClient: Direct GraphQL API (reliable, token-based auth)
+ *   - SourcegraphMCPClient: Claude Agent SDK + MCP (for interactive agent use)
  *
- * Origin: Parent C (agent-sdk-service), kept as-is for reusability.
+ * Both implement the same interface so InvariantEngine works with either.
  */
 
-import { query, type ClaudeCodeOptions } from "@anthropic-ai/claude-code";
+import {
+  query,
+  type SDKMessage,
+  type SDKAssistantMessage,
+} from "@anthropic-ai/claude-code";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,17 +31,163 @@ export interface RepoMatch {
   files: SearchResult[];
 }
 
+export interface SourcegraphSearchClient {
+  keywordSearch(
+    pattern: string,
+    language?: string | null,
+  ): Promise<RepoMatch[]>;
+  searchInRepos(
+    repos: string[],
+    pattern: string,
+  ): Promise<Map<string, SearchResult[]>>;
+}
+
 export interface SourcegraphClientConfig {
   /** Sourcegraph instance URL (e.g. https://sourcegraph.example.com) */
   instanceUrl: string;
   /** Sourcegraph access token */
   accessToken: string;
-  /** Max agent turns per query (safety rail) */
+  /** Max agent turns per query (safety rail, MCP client only) */
   maxTurns?: number;
 }
 
 // ---------------------------------------------------------------------------
-// MCP server configuration
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+function groupResultsByRepo(
+  results: SearchResult[],
+): Map<string, SearchResult[]> {
+  if (!Array.isArray(results)) return new Map();
+  const grouped = new Map<string, SearchResult[]>();
+  for (const r of results) {
+    const existing = grouped.get(r.repo) ?? [];
+    existing.push(r);
+    grouped.set(r.repo, existing);
+  }
+  return grouped;
+}
+
+function groupByRepo(results: SearchResult[]): RepoMatch[] {
+  return Array.from(groupResultsByRepo(results).entries()).map(
+    ([repo, files]) => ({ repo, files }),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// GraphQL Client (direct API, no MCP/agent dependency)
+// ---------------------------------------------------------------------------
+
+interface GraphQLSearchResult {
+  repository: { name: string };
+  file: { path: string };
+  lineMatches: Array<{ lineNumber: number; preview: string }>;
+}
+
+export class SourcegraphGraphQLClient implements SourcegraphSearchClient {
+  private readonly config: SourcegraphClientConfig;
+
+  constructor(config: SourcegraphClientConfig) {
+    this.config = config;
+  }
+
+  async keywordSearch(
+    pattern: string,
+    language?: string | null,
+  ): Promise<RepoMatch[]> {
+    const langFilter = language ? ` lang:${language}` : "";
+    const results = await this.search(`${pattern}${langFilter} count:100`);
+    return groupByRepo(results);
+  }
+
+  async searchInRepos(
+    repos: string[],
+    pattern: string,
+  ): Promise<Map<string, SearchResult[]>> {
+    if (repos.length === 0) return new Map();
+    const repoFilter = repos.map((r) => `repo:^${r}$`).join(" OR ");
+    const queryStr = `${pattern} (${repoFilter}) count:100`;
+    const results = await this.search(queryStr);
+    return groupResultsByRepo(results);
+  }
+
+  private async search(queryStr: string): Promise<SearchResult[]> {
+    const graphqlQuery = `
+      query Search($query: String!) {
+        search(query: $query) {
+          results {
+            results {
+              ... on FileMatch {
+                repository { name }
+                file { path }
+                lineMatches { lineNumber preview }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await fetch(`${this.config.instanceUrl}/.api/graphql`, {
+      method: "POST",
+      signal: AbortSignal.timeout(30_000),
+      headers: {
+        Authorization: `token ${this.config.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: graphqlQuery,
+        variables: { query: queryStr },
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `Sourcegraph API error: ${response.status} ${response.statusText}`,
+      );
+    }
+
+    const json = (await response.json()) as {
+      data?: {
+        search?: {
+          results?: { results?: GraphQLSearchResult[] };
+        };
+      };
+      errors?: Array<{ message: string }>;
+    };
+
+    if (json.errors?.length) {
+      throw new Error(`Sourcegraph GraphQL error: ${json.errors[0].message}`);
+    }
+
+    const matches = json.data?.search?.results?.results ?? [];
+    const results: SearchResult[] = [];
+
+    for (const match of matches) {
+      if (!match.repository || !match.file) continue;
+      for (const line of match.lineMatches ?? []) {
+        results.push({
+          repo: match.repository.name,
+          file: match.file.path,
+          lineNumber: line.lineNumber,
+          content: line.preview,
+          language: "",
+        });
+      }
+    }
+
+    if (matches.length >= 100) {
+      console.error(
+        `[sourcegraph] Warning: result count hit cap (100) for query: ${queryStr} — results may be truncated`,
+      );
+    }
+
+    return results;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MCP Client (Claude Agent SDK, for interactive agent use)
 // ---------------------------------------------------------------------------
 
 function buildMcpConfig(config: SourcegraphClientConfig) {
@@ -52,20 +202,13 @@ function buildMcpConfig(config: SourcegraphClientConfig) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Client
-// ---------------------------------------------------------------------------
-
-export class SourcegraphClient {
+export class SourcegraphMCPClient implements SourcegraphSearchClient {
   private readonly config: SourcegraphClientConfig;
 
   constructor(config: SourcegraphClientConfig) {
     this.config = config;
   }
 
-  /**
-   * Run a keyword search across all repos via the Sourcegraph MCP.
-   */
   async keywordSearch(
     pattern: string,
     language?: string | null,
@@ -78,14 +221,10 @@ export class SourcegraphClient {
     ].join("\n");
 
     return this.runAgent<RepoMatch[]>(prompt, (raw) =>
-      this.groupByRepo(raw as SearchResult[]),
+      groupByRepo(raw as SearchResult[]),
     );
   }
 
-  /**
-   * Search for a pattern within specific repos.
-   * Used for assertion checking (e.g., "repos that import X must also contain Y").
-   */
   async searchInRepos(
     repos: string[],
     pattern: string,
@@ -100,25 +239,14 @@ export class SourcegraphClient {
     const results = await this.runAgent<SearchResult[]>(prompt, (raw) =>
       Array.isArray(raw) ? (raw as SearchResult[]) : [],
     );
-
-    const byRepo = new Map<string, SearchResult[]>();
-    for (const r of results) {
-      const existing = byRepo.get(r.repo) ?? [];
-      existing.push(r);
-      byRepo.set(r.repo, existing);
-    }
-    return byRepo;
+    return groupResultsByRepo(results);
   }
-
-  // ---------------------------------------------------------------------------
-  // Internals
-  // ---------------------------------------------------------------------------
 
   private async runAgent<T>(
     prompt: string,
     transform: (raw: unknown) => T,
   ): Promise<T> {
-    const options: ClaudeCodeOptions = {
+    const conversation = query({
       prompt,
       options: {
         maxTurns: this.config.maxTurns ?? 10,
@@ -127,27 +255,30 @@ export class SourcegraphClient {
           "mcp__sourcegraph__find_references",
           "mcp__sourcegraph__get_file_content",
         ],
+        mcpServers: buildMcpConfig(this.config),
       },
-      mcpServers: buildMcpConfig(this.config),
-    };
+    });
 
-    const messages = await query(options);
+    const messages: SDKMessage[] = [];
+    for await (const message of conversation) {
+      messages.push(message);
+    }
 
     const lastAssistant = [...messages]
       .reverse()
-      .find((m) => m.role === "assistant");
+      .find((m): m is SDKAssistantMessage => m.type === "assistant");
 
     if (!lastAssistant) {
       return transform([]);
     }
 
-    const text =
-      typeof lastAssistant.content === "string"
-        ? lastAssistant.content
-        : lastAssistant.content
-            .filter((b: { type: string }) => b.type === "text")
-            .map((b: { type: string; text?: string }) => b.text ?? "")
-            .join("");
+    const content = lastAssistant.message.content;
+    const text = Array.isArray(content)
+      ? content
+          .filter((b: { type: string }) => b.type === "text")
+          .map((b: { type: string; text?: string }) => b.text ?? "")
+          .join("")
+      : String(content);
 
     try {
       const jsonMatch = text.match(/\[[\s\S]*\]/);
@@ -160,19 +291,5 @@ export class SourcegraphClient {
       );
       return transform([]);
     }
-  }
-
-  private groupByRepo(results: SearchResult[]): RepoMatch[] {
-    if (!Array.isArray(results)) return [];
-    const grouped = new Map<string, SearchResult[]>();
-    for (const r of results) {
-      const existing = grouped.get(r.repo) ?? [];
-      existing.push(r);
-      grouped.set(r.repo, existing);
-    }
-    return Array.from(grouped.entries()).map(([repo, files]) => ({
-      repo,
-      files,
-    }));
   }
 }

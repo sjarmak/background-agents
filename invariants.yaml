@@ -22,10 +22,10 @@ invariants:
   # violations and the entire run should be treated as an error.
   # ──────────────────────────────────────────────────────────────────────
   - id: canary-verification-active
-    description: "CANARY: This synthetic invariant must always detect a violation in the canary-test-fixture repo. If it passes, the verification pipeline is broken."
+    description: "CANARY: This synthetic invariant must always detect a violation. It searches for 'Licensed under the Apache License' which reliably exists in open-source repos. If it passes (zero matches), the Sourcegraph connection or search is broken."
     severity: critical
     search:
-      pattern: "CANARY_INVARIANT_MARKER_DO_NOT_REMOVE"
+      pattern: "Licensed under the Apache License"
       language: ""
     assertion:
       type: must_not_exist

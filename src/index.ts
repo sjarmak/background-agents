@@ -9,7 +9,10 @@
  * B's curl-to-webhook approach via post-slack.sh in the GitHub Action.
  */
 
-import { SourcegraphClient } from "./sourcegraph-client.js";
+import {
+  SourcegraphGraphQLClient,
+  SourcegraphMCPClient,
+} from "./sourcegraph-client.js";
 import { InvariantEngine } from "./invariant-engine.js";
 import {
   detectCIContext,
@@ -25,6 +28,7 @@ import { resolve } from "node:path";
 
 interface AppConfig {
   mode: "cli" | "ci";
+  backend: "graphql" | "mcp";
   configPath: string;
   sourcegraph: {
     instanceUrl: string;
@@ -36,16 +40,18 @@ function loadAppConfig(): AppConfig {
   const mode = parseMode(
     process.argv.find((a) => a.startsWith("--mode="))?.split("=")[1],
   );
+  const backend = process.argv.includes("--mcp") ? "mcp" : "graphql";
   const configPath = resolve(
     process.env.INVARIANTS_CONFIG ?? "invariants.json",
   );
 
   return {
     mode,
+    backend,
     configPath,
     sourcegraph: {
       instanceUrl: requireEnv("SOURCEGRAPH_URL"),
-      accessToken: requireEnv("SOURCEGRAPH_TOKEN"),
+      accessToken: requireEnv("SRC_ACCESS_TOKEN"),
     },
   };
 }
@@ -72,17 +78,18 @@ async function main(): Promise<void> {
   const config = loadAppConfig();
   console.error(`[verifier] Mode: ${config.mode}`);
 
-  const sg = new SourcegraphClient({
+  const sgConfig = {
     instanceUrl: config.sourcegraph.instanceUrl,
     accessToken: config.sourcegraph.accessToken,
-    maxTurns: 12,
-  });
+  };
+  const sg =
+    config.backend === "mcp"
+      ? new SourcegraphMCPClient({ ...sgConfig, maxTurns: 12 })
+      : new SourcegraphGraphQLClient(sgConfig);
 
   const engine = new InvariantEngine(sg);
   const invariants = await engine.loadConfig(config.configPath);
-  console.error(
-    `[verifier] Loaded ${invariants.invariants.length} invariants`,
-  );
+  console.error(`[verifier] Loaded ${invariants.invariants.length} invariants`);
 
   switch (config.mode) {
     case "cli":

@@ -11,7 +11,10 @@
 
 import { z } from "zod";
 import { readFile } from "node:fs/promises";
-import { SourcegraphClient, type RepoMatch } from "./sourcegraph-client.js";
+import {
+  type SourcegraphSearchClient,
+  type RepoMatch,
+} from "./sourcegraph-client.js";
 
 // ---------------------------------------------------------------------------
 // Schema (Zod — from Parent C)
@@ -79,7 +82,7 @@ export interface VerificationReport {
 // ---------------------------------------------------------------------------
 
 export class InvariantEngine {
-  constructor(private readonly sg: SourcegraphClient) {}
+  constructor(private readonly sg: SourcegraphSearchClient) {}
 
   /**
    * Load and validate invariants from a JSON config file.
