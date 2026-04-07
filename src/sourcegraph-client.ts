@@ -100,6 +100,56 @@ export class SourcegraphGraphQLClient implements SourcegraphSearchClient {
     return groupByRepo(results);
   }
 
+  /**
+   * Pre-flight health check — issues a minimal GraphQL query to verify the
+   * Sourcegraph instance is reachable and the access token is valid. Throws
+   * on any connection, HTTP, GraphQL, or auth failure so callers can exit
+   * with a distinct non-violation exit code.
+   */
+  async healthCheck(): Promise<{ username: string | null }> {
+    const graphqlQuery = `query HealthCheck { currentUser { username } }`;
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.config.instanceUrl}/.api/graphql`, {
+        method: "POST",
+        signal: AbortSignal.timeout(10_000),
+        headers: {
+          Authorization: `token ${this.config.accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query: graphqlQuery }),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Sourcegraph pre-flight connection failed: ${msg}`);
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(
+        `Sourcegraph pre-flight auth failed: ${response.status} ${response.statusText}`,
+      );
+    }
+    if (!response.ok) {
+      throw new Error(
+        `Sourcegraph pre-flight HTTP error: ${response.status} ${response.statusText}`,
+      );
+    }
+
+    const json = (await response.json()) as {
+      data?: { currentUser?: { username: string } | null };
+      errors?: Array<{ message: string }>;
+    };
+
+    if (json.errors?.length) {
+      throw new Error(
+        `Sourcegraph pre-flight GraphQL error: ${json.errors[0].message}`,
+      );
+    }
+
+    return { username: json.data?.currentUser?.username ?? null };
+  }
+
   async searchInRepos(
     repos: string[],
     pattern: string,

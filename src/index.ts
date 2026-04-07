@@ -87,6 +87,23 @@ async function main(): Promise<void> {
       ? new SourcegraphMCPClient({ ...sgConfig, maxTurns: 12 })
       : new SourcegraphGraphQLClient(sgConfig);
 
+  // Pre-flight health check (GraphQL backend only). On failure, exit with
+  // code 2 to distinguish connection/auth issues from invariant violations
+  // (code 1). CI consumers can then post a "Sourcegraph unreachable" comment
+  // instead of treating this as a hard failure.
+  if (sg instanceof SourcegraphGraphQLClient) {
+    try {
+      const health = await sg.healthCheck();
+      console.error(
+        `[verifier] Sourcegraph pre-flight OK (user: ${health.username ?? "anonymous"})`,
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[verifier] ${msg}`);
+      process.exit(2);
+    }
+  }
+
   const engine = new InvariantEngine(sg);
   const invariants = await engine.loadConfig(config.configPath);
   console.error(`[verifier] Loaded ${invariants.invariants.length} invariants`);
