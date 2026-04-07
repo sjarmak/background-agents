@@ -4,7 +4,13 @@ on:
   schedule:
     # Weekly: Monday 9am UTC
     - cron: "0 9 * * 1"
-  workflow_dispatch: # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      config_file:
+        description: "Invariants config file path (relative to repo root)"
+        type: string
+        required: false
+        default: "invariants.yaml"
 
 concurrency:
   group: invariant-check-scheduled
@@ -48,11 +54,12 @@ jobs:
         env:
           SOURCEGRAPH_URL: ${{ secrets.SOURCEGRAPH_URL }}
           SRC_ACCESS_TOKEN: ${{ secrets.SRC_ACCESS_TOKEN }}
+          CONFIG_FILE: ${{ inputs.config_file || 'invariants.yaml' }}
         run: |
           echo "::add-mask::$SRC_ACCESS_TOKEN"
           echo "::add-mask::$SOURCEGRAPH_URL"
           chmod +x scripts/verify-invariants.sh
-          scripts/verify-invariants.sh -v > report.json || true
+          scripts/verify-invariants.sh -v -c "$CONFIG_FILE" > report.json || true
 
       - name: Post to Slack
         if: always() && steps.verify.outcome != 'cancelled'
