@@ -12,7 +12,6 @@ on:
       - "**/package.json"
       - "**/go.mod"
       - "**/requirements.txt"
-      - "invariants.yaml"
       - "invariants.json"
       - "CLAUDE.md"
 
@@ -44,6 +43,9 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+      - name: Unit tests
+        run: npm test
+
   verify-invariants:
     needs: build-check
     runs-on: ubuntu-latest
@@ -59,7 +61,7 @@ jobs:
           # Prevent PR authors from modifying their own invariant checks, agent instructions,
           # or orchestration scripts. Always use the base branch versions of trust-boundary files.
           git fetch origin "$BASE_REF" --depth=1
-          git show "origin/$BASE_REF:invariants.yaml" > invariants.yaml 2>/dev/null || echo "invariants: []" > invariants.yaml
+          git show "origin/$BASE_REF:invariants.json" > invariants.json 2>/dev/null || echo '{"invariants": []}' > invariants.json
           git show "origin/$BASE_REF:CLAUDE.md" > CLAUDE.md 2>/dev/null || true
           echo "Using trust-boundary files from base branch: $BASE_REF"
 
