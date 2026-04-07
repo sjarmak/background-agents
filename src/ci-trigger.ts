@@ -75,10 +75,17 @@ export function formatPRComment(report: VerificationReport): string {
   ];
 
   for (const r of results) {
-    const statusIcon =
-      r.status === "pass" ? "✅" : r.status === "fail" ? "❌" : "⚠️";
+    const isCanary = r.id.startsWith("canary-");
+    const statusIcon = isCanary
+      ? "🔵"
+      : r.status === "pass"
+        ? "✅"
+        : r.status === "fail"
+          ? "❌"
+          : "⚠️";
+    const statusLabel = isCanary ? "expected" : r.status;
     lines.push(
-      `| \`${r.id}\` | ${r.severity} | ${statusIcon} ${r.status} | ${r.violations.length} |`,
+      `| \`${r.id}\` | ${r.severity} | ${statusIcon} ${statusLabel} | ${r.violations.length} |`,
     );
   }
 

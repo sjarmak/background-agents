@@ -141,6 +141,8 @@ describe("formatPRComment", () => {
     ]);
     const out = formatPRComment(report);
     expect(out).toContain("`canary-synthetic`");
+    expect(out).toContain("🔵 expected");
+    expect(out).not.toContain("❌ fail | 1");
   });
 });
 
