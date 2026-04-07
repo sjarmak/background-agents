@@ -61,35 +61,16 @@ jobs:
           git fetch origin "$BASE_REF" --depth=1
           git show "origin/$BASE_REF:invariants.yaml" > invariants.yaml 2>/dev/null || echo "invariants: []" > invariants.yaml
           git show "origin/$BASE_REF:CLAUDE.md" > CLAUDE.md 2>/dev/null || true
-          git show "origin/$BASE_REF:invariants.schema.json" > invariants.schema.json 2>/dev/null || true
-          git show "origin/$BASE_REF:scripts/verify-invariants.sh" > scripts/verify-invariants.sh 2>/dev/null || true
-          git show "origin/$BASE_REF:scripts/post-github-comment.sh" > scripts/post-github-comment.sh 2>/dev/null || true
           echo "Using trust-boundary files from base branch: $BASE_REF"
 
-      - name: Install yq
-        run: |
-          YQ_VERSION="v4.44.1"
-          YQ_SHA256="a7df369b3129c22ade6b3c05b9b71271af28a0c41a3d9e205a91baa44a9f4450"
-          wget -qO /tmp/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
-          echo "${YQ_SHA256}  /tmp/yq" | sha256sum -c -
-          sudo install /tmp/yq /usr/local/bin/yq
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
 
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code@1.0.33
-
-      - name: Validate invariants config
-        run: |
-          # Optional: validate against JSON Schema if ajv-cli is available
-          if npx ajv-cli validate -s invariants.schema.json -d invariants.yaml --spec=draft2020 2>/dev/null; then
-            echo "Config validation passed"
-          else
-            echo "::warning::Schema validation skipped or failed (non-blocking)"
-          fi
-
-      - name: Setup Claude OAuth credentials
-        run: |
-          mkdir -p ~/.claude
-          echo '${{ secrets.CLAUDE_OAUTH_CREDENTIALS }}' > ~/.claude/.credentials.json
+      - name: Install dependencies
+        run: npm ci
 
       - name: Verify cross-repo invariants
         id: verify
@@ -97,9 +78,8 @@ jobs:
           SOURCEGRAPH_URL: ${{ secrets.SOURCEGRAPH_URL }}
           SRC_ACCESS_TOKEN: ${{ secrets.SRC_ACCESS_TOKEN }}
         run: |
-          chmod +x scripts/verify-invariants.sh
-          # Run verifier; capture output even on failure (exit 1 = violations found)
-          scripts/verify-invariants.sh -v > report.json || true
+          # Run TS/GraphQL verifier; capture output even on failure (exit 1 = violations found)
+          npx tsx src/index.ts --mode=cli > report.json || true
 
       - name: Post or update PR comment
         if: always() && steps.verify.outcome != 'cancelled'
