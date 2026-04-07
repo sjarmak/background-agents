@@ -49,6 +49,8 @@ jobs:
           SOURCEGRAPH_URL: ${{ secrets.SOURCEGRAPH_URL }}
           SRC_ACCESS_TOKEN: ${{ secrets.SRC_ACCESS_TOKEN }}
         run: |
+          echo "::add-mask::$SRC_ACCESS_TOKEN"
+          echo "::add-mask::$SOURCEGRAPH_URL"
           chmod +x scripts/verify-invariants.sh
           scripts/verify-invariants.sh -v > report.json || true
 

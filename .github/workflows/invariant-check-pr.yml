@@ -78,6 +78,9 @@ jobs:
           SOURCEGRAPH_URL: ${{ secrets.SOURCEGRAPH_URL }}
           SRC_ACCESS_TOKEN: ${{ secrets.SRC_ACCESS_TOKEN }}
         run: |
+          # Mask secrets so they cannot be printed in logs
+          echo "::add-mask::$SRC_ACCESS_TOKEN"
+          echo "::add-mask::$SOURCEGRAPH_URL"
           # Run TS/GraphQL verifier; capture output even on failure (exit 1 = violations found)
           npx tsx src/index.ts --mode=cli > report.json || true
 
