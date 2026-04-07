@@ -339,37 +339,14 @@ fi
 # =========================================================================
 if [[ "$MODE" == "ts" ]]; then
   log ""
-  log "Phase 6: YAML config parity check"
+  log "Phase 6: JSON config sanity check"
 
-  # Verify YAML and JSON invariant counts match
-  YAML_COUNT=$(python3 -c "
-import json, sys
-try:
-    import yaml
-    with open('$REPO_ROOT/invariants.yaml') as f:
-        data = yaml.safe_load(f)
-    print(len(data.get('invariants', [])))
-except ImportError:
-    print('skip')
-")
   JSON_COUNT=$(jq '.invariants | length' "$REPO_ROOT/invariants.json")
-
-  if [[ "$YAML_COUNT" == "skip" ]]; then
-    log "  SKIP: PyYAML not installed, skipping YAML parity check"
+  if [[ "$JSON_COUNT" -gt 0 ]]; then
+    log "  OK: invariants.json has $JSON_COUNT invariants"
   else
-    assert_eq "$YAML_COUNT" "$JSON_COUNT" "YAML and JSON have same invariant count ($YAML_COUNT)"
-
-    # Verify IDs match
-    YAML_IDS=$(python3 -c "
-import yaml
-with open('$REPO_ROOT/invariants.yaml') as f:
-    data = yaml.safe_load(f)
-for inv in data.get('invariants', []):
-    print(inv['id'])
-" | sort)
-    JSON_IDS=$(jq -r '.invariants[].id' "$REPO_ROOT/invariants.json" | sort)
-
-    assert_eq "$YAML_IDS" "$JSON_IDS" "YAML and JSON have matching invariant IDs"
+    log "  FAIL: invariants.json has no invariants"
+    exit 1
   fi
 fi
 

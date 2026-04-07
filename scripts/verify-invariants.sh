@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # verify-invariants.sh — Main orchestrator for cross-repo invariant verification.
 #
-# Reads invariants from YAML, constructs a per-invariant prompt for Claude CLI
+# Reads invariants from JSON, constructs a per-invariant prompt for Claude CLI
 # with Sourcegraph MCP, and outputs a JSON report to stdout.
 #
 # The agent instructions live in CLAUDE.md — this script constructs a minimal
@@ -12,7 +12,7 @@
 #   ./scripts/verify-invariants.sh [options]
 #
 # Options:
-#   -c FILE   Invariants config file (default: invariants.yaml)
+#   -c FILE   Invariants config file (default: invariants.json)
 #   -m FILE   MCP config file (default: mcp-config.json)
 #   -s FILE   Schema file for validation (default: invariants.schema.json)
 #   -t N      Max turns per invariant check (default: 10)
@@ -38,7 +38,7 @@ fi
 # --- Defaults ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CONFIG_FILE="invariants.yaml"
+CONFIG_FILE="invariants.json"
 MCP_CONFIG="mcp-config.json"
 SCHEMA_FILE="invariants.schema.json"
 MAX_TURNS=10
@@ -75,7 +75,7 @@ done
 [[ "$SCHEMA_FILE" != /* ]] && SCHEMA_FILE="$REPO_ROOT/$SCHEMA_FILE"
 
 # --- Validate prerequisites ---
-for cmd in claude yq jq python3; do
+for cmd in claude jq python3; do
   if ! command -v "$cmd" &>/dev/null; then
     echo "Error: '$cmd' is required but not found in PATH" >&2
     exit 1
@@ -103,7 +103,7 @@ fi
 # --- Validate config against JSON Schema ---
 if command -v ajv &>/dev/null && [[ -f "$SCHEMA_FILE" ]]; then
   if ! ajv validate -s "$SCHEMA_FILE" -d "$CONFIG_FILE" --spec=draft2020 2>/dev/null; then
-    echo "Error: invariants.yaml failed schema validation" >&2
+    echo "Error: invariants config failed schema validation" >&2
     echo "Run: ajv validate -s $SCHEMA_FILE -d $CONFIG_FILE" >&2
     exit 1
   fi
@@ -130,7 +130,7 @@ emit_canary_error() {
 }
 
 # --- Read invariant count ---
-INVARIANT_COUNT=$(yq '.invariants | length' "$CONFIG_FILE")
+INVARIANT_COUNT=$(jq '.invariants | length' "$CONFIG_FILE")
 log "Found $INVARIANT_COUNT invariants to verify"
 
 # --- Empty config guard ---
@@ -157,7 +157,7 @@ fi
 log "Sourcegraph connectivity check passed"
 
 # --- Pre-parse all invariants from YAML once ---
-INVARIANTS_JSON=$(yq -o=json '.invariants' "$CONFIG_FILE")
+INVARIANTS_JSON=$(jq '.invariants' "$CONFIG_FILE")
 
 # Detect canary invariants and collect all IDs
 CANARY_IDS=()

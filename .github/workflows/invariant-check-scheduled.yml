@@ -10,7 +10,7 @@ on:
         description: "Invariants config file path (relative to repo root)"
         type: string
         required: false
-        default: "invariants.yaml"
+        default: "invariants.json"
 
 concurrency:
   group: invariant-check-scheduled
@@ -26,14 +26,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Install yq
-        run: |
-          YQ_VERSION="v4.44.1"
-          YQ_SHA256="a7df369b3129c22ade6b3c05b9b71271af28a0c41a3d9e205a91baa44a9f4450"
-          wget -qO /tmp/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
-          echo "${YQ_SHA256}  /tmp/yq" | sha256sum -c -
-          sudo install /tmp/yq /usr/local/bin/yq
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -54,7 +46,7 @@ jobs:
         env:
           SOURCEGRAPH_URL: ${{ secrets.SOURCEGRAPH_URL }}
           SRC_ACCESS_TOKEN: ${{ secrets.SRC_ACCESS_TOKEN }}
-          CONFIG_FILE: ${{ inputs.config_file || 'invariants.yaml' }}
+          CONFIG_FILE: ${{ inputs.config_file || 'invariants.json' }}
         run: |
           echo "::add-mask::$SRC_ACCESS_TOKEN"
           echo "::add-mask::$SOURCEGRAPH_URL"
