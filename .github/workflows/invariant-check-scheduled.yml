@@ -29,6 +29,12 @@ jobs:
           echo "${YQ_SHA256}  /tmp/yq" | sha256sum -c -
           sudo install /tmp/yq /usr/local/bin/yq
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@1.0.33
 
