@@ -112,6 +112,19 @@ export class SourcegraphGraphQLClient implements SourcegraphSearchClient {
   }
 
   private async search(queryStr: string): Promise<SearchResult[]> {
+    // Retry once after 5s on HTTP 5xx. Two consecutive 5xx = real outage.
+    try {
+      return await this.searchOnce(queryStr);
+    } catch (err) {
+      if (err instanceof Error && /^Sourcegraph API error: 5\d\d/.test(err.message)) {
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        return await this.searchOnce(queryStr);
+      }
+      throw err;
+    }
+  }
+
+  private async searchOnce(queryStr: string): Promise<SearchResult[]> {
     const graphqlQuery = `
       query Search($query: String!) {
         search(query: $query) {
