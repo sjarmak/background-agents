@@ -12,9 +12,9 @@
 #   ./scripts/verify-invariants.sh [options]
 #
 # Options:
-#   -c FILE   Invariants config file (default: invariants.json)
-#   -m FILE   MCP config file (default: mcp-config.json)
-#   -s FILE   Schema file for validation (default: invariants.schema.json)
+#   -c FILE   Invariants config file (default: config/invariants.json)
+#   -m FILE   MCP config file (default: config/mcp-config.json)
+#   -s FILE   Schema file for validation (default: config/invariants.schema.json)
 #   -t N      Max turns per invariant check (default: 10)
 #   -T N      Per-invariant timeout in seconds (default: 120)
 #   -P N      Max parallel jobs (default: 4)
@@ -38,9 +38,9 @@ fi
 # --- Defaults ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CONFIG_FILE="invariants.json"
-MCP_CONFIG="mcp-config.json"
-SCHEMA_FILE="invariants.schema.json"
+CONFIG_FILE="config/invariants.json"
+MCP_CONFIG="config/mcp-config.json"
+SCHEMA_FILE="config/invariants.schema.json"
 MAX_TURNS=10
 PER_TIMEOUT=120
 MAX_PARALLEL=4

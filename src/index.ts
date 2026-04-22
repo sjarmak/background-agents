@@ -42,7 +42,7 @@ function loadAppConfig(): AppConfig {
   );
   const backend = process.argv.includes("--mcp") ? "mcp" : "graphql";
   const configPath = resolve(
-    process.env.INVARIANTS_CONFIG ?? "invariants.json",
+    process.env.INVARIANTS_CONFIG ?? "config/invariants.json",
   );
 
   return {

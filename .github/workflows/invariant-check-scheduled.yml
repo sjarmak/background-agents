@@ -10,7 +10,7 @@ on:
         description: "Invariants config file path (relative to repo root)"
         type: string
         required: false
-        default: "invariants.json"
+        default: "config/invariants.json"
 
 concurrency:
   group: invariant-check-scheduled
@@ -46,7 +46,7 @@ jobs:
         env:
           SOURCEGRAPH_URL: ${{ secrets.SOURCEGRAPH_URL }}
           SRC_ACCESS_TOKEN: ${{ secrets.SRC_ACCESS_TOKEN }}
-          CONFIG_FILE: ${{ inputs.config_file || 'invariants.json' }}
+          CONFIG_FILE: ${{ inputs.config_file || 'config/invariants.json' }}
         run: |
           echo "::add-mask::$SRC_ACCESS_TOKEN"
           echo "::add-mask::$SOURCEGRAPH_URL"

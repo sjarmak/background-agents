@@ -8,7 +8,7 @@ or to Slack.
 
 ## What it does
 
-Given a small declarative rules file (`invariants.json`) like:
+Given a small declarative rules file (`config/invariants.json`) like:
 
 ```json
 {
@@ -78,10 +78,10 @@ Two workflows in `.github/workflows/`:
 
 | Workflow                          | Trigger                  | Output                         |
 | --------------------------------- | ------------------------ | ------------------------------ |
-| `invariant-check-pr.yml`          | `pull_request` on code paths + `invariants.json` | PR comment (idempotent upsert) + failing check |
+| `invariant-check-pr.yml`          | `pull_request` on code paths + `config/invariants.json` | PR comment (idempotent upsert) + failing check |
 | `invariant-check-scheduled.yml`   | Weekly cron (Mon 09:00 UTC) + `workflow_dispatch` | Slack webhook + uploaded artifact |
 
-The PR workflow pins `invariants.json` and `CLAUDE.md` to the base branch as a
+The PR workflow pins `config/invariants.json` and `CLAUDE.md` to the base branch as a
 **trust boundary** so a PR author cannot weaken invariants or agent
 instructions in the same PR they want to merge.
 
@@ -94,11 +94,11 @@ Required GitHub repo secrets:
 | `CLAUDE_OAUTH_CREDENTIALS` | Claude credentials JSON (MCP path only)            |
 | `SLACK_WEBHOOK_URL`        | Slack incoming webhook for scheduled runs          |
 
-See [`RUNBOOK.md`](./RUNBOOK.md) §4 for secret rotation.
+See [`docs/RUNBOOK.md`](./docs/RUNBOOK.md) §4 for secret rotation.
 
 ## Canary invariant
 
-The first entry in `invariants.json` (id prefix `canary-*`) is a synthetic rule
+The first entry in `config/invariants.json` (id prefix `canary-*`) is a synthetic rule
 that is **expected to fail**. It searches for something known to exist in any
 open-source repo; if it ever passes, Sourcegraph search is broken and the run
 is untrustworthy. `ci-trigger.ts` renders canary failures as "expected" in PR
@@ -108,23 +108,26 @@ comments and excludes them from the failure gate.
 
 ```
 src/
-  index.ts                 # entrypoint, mode dispatch (cli | ci), pre-flight
-  invariant-engine.ts      # rule loader + per-invariant verification loop
-  sourcegraph-client.ts    # SourcegraphGraphQLClient + SourcegraphMCPClient
-  ci-trigger.ts            # GitHub context detection, PR comment formatting, exit code policy
+  index.ts                        # entrypoint, mode dispatch (cli | ci), pre-flight
+  invariant-engine.ts             # rule loader + per-invariant verification loop
+  sourcegraph-client.ts           # SourcegraphGraphQLClient + SourcegraphMCPClient
+  ci-trigger.ts                   # GitHub context detection, PR comment formatting, exit code policy
 scripts/
-  verify-invariants.sh     # CI-side runner
-  post-github-comment.sh   # idempotent PR comment upsert
-  post-slack.sh            # Slack webhook payload
+  verify-invariants.sh            # CI-side runner
+  post-github-comment.sh          # idempotent PR comment upsert
+  post-slack.sh                   # Slack webhook payload
 tests/
-  ci-trigger.test.ts       # Vitest unit tests
-  e2e-verify.sh            # end-to-end against live Sourcegraph
-invariants.json            # rule definitions (max 20, enforced by schema)
-invariants.schema.json     # JSON Schema for invariants.json
-mcp-config.json            # Sourcegraph MCP server config
-CLAUDE.md                  # agent instructions + output contract
-RUNBOOK.md                 # operator guide: triage, rotation, emergency disable
-prd_ci_setup.md            # original PRD for the CI pipeline
+  ci-trigger.test.ts              # Vitest unit tests
+  e2e-verify.sh                   # end-to-end against live Sourcegraph
+config/
+  invariants.json                 # rule definitions (max 20, enforced by schema)
+  invariants.schema.json          # JSON Schema for invariants.json
+  mcp-config.json                 # Sourcegraph MCP server config
+docs/
+  RUNBOOK.md                      # operator guide: triage, rotation, emergency disable
+  AGENTS.md                       # contributor workflow (beads, session completion)
+  prd_ci_setup.md                 # original PRD for the CI pipeline
+CLAUDE.md                         # agent instructions + output contract
 ```
 
 ## Reference architecture
@@ -150,9 +153,9 @@ Components that transfer cleanly to adjacent use cases (e.g. `webhook → DeepSe
 ## Documentation map
 
 - [`CLAUDE.md`](./CLAUDE.md) — agent instructions, invariant schema, JSON output contract
-- [`RUNBOOK.md`](./RUNBOOK.md) — operator guide: triage, secret rotation, emergency disable, failure modes
-- [`AGENTS.md`](./AGENTS.md) — contributor workflow (beads, session completion)
-- [`prd_ci_setup.md`](./prd_ci_setup.md) — original PRD for the CI pipeline
+- [`docs/RUNBOOK.md`](./docs/RUNBOOK.md) — operator guide: triage, secret rotation, emergency disable, failure modes
+- [`docs/AGENTS.md`](./docs/AGENTS.md) — contributor workflow (beads, session completion)
+- [`docs/prd_ci_setup.md`](./docs/prd_ci_setup.md) — original PRD for the CI pipeline
 
 ## License
 

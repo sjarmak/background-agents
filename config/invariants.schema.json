@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Cross-Repo Invariants Config",
-  "description": "Schema for invariants.json — defines cross-repo rules verified by Sourcegraph MCP.",
+  "description": "Schema for config/invariants.json — defines cross-repo rules verified by Sourcegraph MCP.",
   "type": "object",
   "required": ["invariants"],
   "additionalProperties": false,

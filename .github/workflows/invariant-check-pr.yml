@@ -12,7 +12,7 @@ on:
       - "**/package.json"
       - "**/go.mod"
       - "**/requirements.txt"
-      - "invariants.json"
+      - "config/invariants.json"
       - "CLAUDE.md"
 
 concurrency:
@@ -61,7 +61,8 @@ jobs:
           # Prevent PR authors from modifying their own invariant checks, agent instructions,
           # or orchestration scripts. Always use the base branch versions of trust-boundary files.
           git fetch origin "$BASE_REF" --depth=1
-          git show "origin/$BASE_REF:invariants.json" > invariants.json 2>/dev/null || echo '{"invariants": []}' > invariants.json
+          mkdir -p config
+          git show "origin/$BASE_REF:config/invariants.json" > config/invariants.json 2>/dev/null || echo '{"invariants": []}' > config/invariants.json
           git show "origin/$BASE_REF:CLAUDE.md" > CLAUDE.md 2>/dev/null || true
           echo "Using trust-boundary files from base branch: $BASE_REF"
 

@@ -341,11 +341,11 @@ if [[ "$MODE" == "ts" ]]; then
   log ""
   log "Phase 6: JSON config sanity check"
 
-  JSON_COUNT=$(jq '.invariants | length' "$REPO_ROOT/invariants.json")
+  JSON_COUNT=$(jq '.invariants | length' "$REPO_ROOT/config/invariants.json")
   if [[ "$JSON_COUNT" -gt 0 ]]; then
-    log "  OK: invariants.json has $JSON_COUNT invariants"
+    log "  OK: config/invariants.json has $JSON_COUNT invariants"
   else
-    log "  FAIL: invariants.json has no invariants"
+    log "  FAIL: config/invariants.json has no invariants"
     exit 1
   fi
 fi

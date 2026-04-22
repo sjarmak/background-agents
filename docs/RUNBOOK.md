@@ -13,7 +13,7 @@ GitHub Actions (cron / PR trigger)
   Claude Code CLI
         |
         v
-  invariants.json  -->  Agent reads invariants
+  config/invariants.json  -->  Agent reads invariants
         |
         v
   Sourcegraph MCP  -->  keyword_search / read_file / find_references
@@ -30,12 +30,12 @@ GitHub Actions (cron / PR trigger)
 
 | Component                | Location  | Purpose                       |
 | ------------------------ | --------- | ----------------------------- |
-| `invariants.json`        | repo root | Invariant definitions         |
-| `invariants.schema.json` | repo root | JSON Schema for validation    |
-| `mcp-config.json`        | repo root | Sourcegraph MCP server config |
-| `CLAUDE.md`              | repo root | Agent instructions            |
-| `.github/workflows/`     | repo      | CI/CD triggers (cron + PR)    |
-| `scripts/`               | repo      | Helper scripts for CI         |
+| `config/invariants.json`        | repo `config/` | Invariant definitions         |
+| `config/invariants.schema.json` | repo `config/` | JSON Schema for validation    |
+| `config/mcp-config.json`        | repo `config/` | Sourcegraph MCP server config |
+| `CLAUDE.md`                     | repo root      | Agent instructions            |
+| `.github/workflows/`            | repo           | CI/CD triggers (cron + PR)    |
+| `scripts/`                      | repo           | Helper scripts for CI         |
 
 ## 2. How to Triage a Failed Run
 
@@ -77,7 +77,7 @@ Edit the workflow YAML and comment out the `on:` triggers:
 #     - cron: '0 9 * * 1'
 #   pull_request:
 #     paths:
-#       - 'invariants.json'
+#       - 'config/invariants.json'
 ```
 
 Push the change to disable all automated runs. Revert when ready to re-enable.
@@ -106,8 +106,8 @@ After rotating any secret:
 ### Process
 
 1. **Create a PR** — all invariant changes require review
-2. **Edit `invariants.json`** — add the new invariant following the existing format
-3. **Validate against schema** — run: `ajv validate -s invariants.schema.json -d invariants.json`
+2. **Edit `config/invariants.json`** — add the new invariant following the existing format
+3. **Validate against schema** — run: `ajv validate -s config/invariants.schema.json -d config/invariants.json`
 4. **Respect the cap** — the schema enforces a maximum of 20 invariants (`maxItems: 20`). Remove or consolidate before adding if at the limit.
 5. **Canary must still fire** — verify the `canary-verification-active` invariant is still the first entry and hasn't been removed
 6. **Test locally** — run the verifier manually against the new invariant before merging
@@ -128,7 +128,7 @@ After rotating any secret:
 | Run times out                          | Too many search results or Sourcegraph is slow                              | Add language filters; reduce invariant count; check Sourcegraph performance                       |
 | `"status": "error"` in report          | API key invalid, network error, or schema validation failure                | Check CI logs for the specific error message; verify secrets                                      |
 | Slack notification missing             | Webhook URL invalid or Slack app deactivated                                | Test webhook manually with `curl`; regenerate if needed                                           |
-| Schema validation fails                | `invariants.json` doesn't match `invariants.schema.json`                    | Run `ajv validate` locally; check for typos, missing required fields, or exceeding `maxItems: 20` |
+| Schema validation fails                | `config/invariants.json` doesn't match `config/invariants.schema.json`      | Run `ajv validate` locally; check for typos, missing required fields, or exceeding `maxItems: 20` |
 | Duplicate/stale violations             | Sourcegraph index is behind                                                 | Check indexing status; wait for re-index or trigger manually                                      |
 
 ## 7. Ownership
