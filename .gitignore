@@ -1,10 +1,19 @@
 node_modules/
 dist/
+coverage/
 report.json
 *.log
 .env
 .env.local
 .env.*
+
+# Local tool state — dot-folders kept out of the repo.
+# .github/ is intentionally NOT ignored (holds CI workflows).
+.beads/
+.brainstorm/
+.claude/
+.codex/
+.gc/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
