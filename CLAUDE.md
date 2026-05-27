@@ -1,8 +1,31 @@
 # Cross-Repo Invariant Verifier — Agent Instructions
 
-You are verifying cross-repo invariants using Sourcegraph MCP tools.
+> **What is this?** The Cross-Repo Invariant Verifier is a background agent that
+> checks organization-wide code invariants across every Sourcegraph-indexed
+> repository, triggered by GitHub PR events and a weekly cron, emitting a
+> strict-JSON violation report. See [`README.md`](./README.md) for the full
+> architecture, CI integration, and repository layout.
 
-## Available Tools
+You are verifying cross-repo invariants against Sourcegraph.
+
+## Backends
+
+The verifier reaches Sourcegraph through one of two backends, selected at
+startup in [`src/index.ts`](./src/index.ts):
+
+- **GraphQL (default)** — `SourcegraphGraphQLClient`, used whenever the `--mcp`
+  flag is absent (`src/index.ts`: `process.argv.includes("--mcp") ? "mcp" : "graphql"`).
+  It calls the Sourcegraph GraphQL API directly; no Claude agent or MCP server is
+  involved. This is the path CI runs.
+- **MCP (opt-in)** — `SourcegraphMCPClient`, enabled with the `--mcp` flag. It
+  drives a Claude agent equipped with the Sourcegraph MCP tools listed below.
+
+The tool-driven verification instructions in this file apply to the **MCP path**.
+On the default GraphQL path the same invariant semantics run in code via the
+`InvariantEngine` rather than through an agent — but the invariant schema and the
+JSON output contract below are identical for both.
+
+## Available Tools (MCP path)
 
 - `mcp__sourcegraph__sg_keyword_search` — Search code across all indexed repositories
 - `mcp__sourcegraph__sg_find_references` — Find all references to a symbol across repos
@@ -72,6 +95,41 @@ You MUST return ONLY a valid JSON object — no markdown fences, no explanation,
 - If no violations: `{"status": "pass", "violations": []}`
 - If violations found: `{"status": "fail", "violations": [...]}`
 - If an error occurs: `{"status": "error", "violations": [], "error": "description"}`
+
+## Build & test commands
+
+```bash
+npm ci                  # install pinned dependencies
+npm run build           # compile TypeScript to dist/ (tsc)
+npx tsc --noEmit        # typecheck only (CI gate, no emit)
+npm test                # run unit tests (vitest run)
+npm run test:coverage   # unit tests with coverage (vitest run --coverage)
+npm run verify          # one-shot CLI verification, JSON report to stdout (tsx src/index.ts --mode=cli)
+npm run dev             # run the entrypoint via tsx, no build step
+```
+
+Run against the MCP backend instead of the default GraphQL path:
+
+```bash
+npx tsx src/index.ts --mode=cli --mcp
+```
+
+`SOURCEGRAPH_URL` and `SRC_ACCESS_TOKEN` must be set in the environment for any
+verification run (see `README.md` §Quick start).
+
+## Code style
+
+- **TypeScript, strict mode** (`tsconfig.json` `"strict": true`), targeting
+  ES2022 with `NodeNext` modules. Source lives in `src/`, compiles to `dist/`.
+- **ESM throughout** — `package.json` sets `"type": "module"`; relative imports
+  use explicit `.js` extensions (e.g. `./sourcegraph-client.js`) as `NodeNext`
+  resolution requires.
+- Explicit types on exported functions and public APIs; let local inference
+  handle the rest. Avoid `any` — narrow `unknown` instead.
+- Config and external input are validated with **Zod**.
+- Diagnostics go to **stderr** (`console.error`); only the strict-JSON report
+  goes to **stdout** (`console.log`), so the output contract above stays
+  machine-parseable.
 
 ## Output Formats (for report consumers)
 
