@@ -13,6 +13,7 @@ import {
   type SDKMessage,
   type SDKAssistantMessage,
 } from "@anthropic-ai/claude-code";
+import { z } from "zod";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -31,15 +32,26 @@ export interface RepoMatch {
   files: SearchResult[];
 }
 
+/** True when results hit the backend's result cap and may be incomplete. */
+export interface KeywordSearchResponse {
+  matches: RepoMatch[];
+  truncated: boolean;
+}
+
+export interface RepoSearchResponse {
+  matches: Map<string, SearchResult[]>;
+  truncated: boolean;
+}
+
 export interface SourcegraphSearchClient {
   keywordSearch(
     pattern: string,
     language?: string | null,
-  ): Promise<RepoMatch[]>;
+  ): Promise<KeywordSearchResponse>;
   searchInRepos(
     repos: string[],
     pattern: string,
-  ): Promise<Map<string, SearchResult[]>>;
+  ): Promise<RepoSearchResponse>;
 }
 
 export interface SourcegraphClientConfig {
@@ -74,6 +86,10 @@ function groupByRepo(results: SearchResult[]): RepoMatch[] {
   );
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // ---------------------------------------------------------------------------
 // GraphQL Client (direct API, no MCP/agent dependency)
 // ---------------------------------------------------------------------------
@@ -83,6 +99,9 @@ interface GraphQLSearchResult {
   file: { path: string };
   lineMatches: Array<{ lineNumber: number; preview: string }>;
 }
+
+const RESULT_CAP = 500;
+const REPO_BATCH_SIZE = 20;
 
 export class SourcegraphGraphQLClient implements SourcegraphSearchClient {
   private readonly config: SourcegraphClientConfig;
@@ -94,10 +113,12 @@ export class SourcegraphGraphQLClient implements SourcegraphSearchClient {
   async keywordSearch(
     pattern: string,
     language?: string | null,
-  ): Promise<RepoMatch[]> {
+  ): Promise<KeywordSearchResponse> {
     const langFilter = language ? ` lang:${language}` : "";
-    const results = await this.search(`${pattern}${langFilter} count:100`);
-    return groupByRepo(results);
+    const { results, truncated } = await this.search(
+      `${pattern}${langFilter} count:${RESULT_CAP}`,
+    );
+    return { matches: groupByRepo(results), truncated };
   }
 
   /**
@@ -153,15 +174,28 @@ export class SourcegraphGraphQLClient implements SourcegraphSearchClient {
   async searchInRepos(
     repos: string[],
     pattern: string,
-  ): Promise<Map<string, SearchResult[]>> {
-    if (repos.length === 0) return new Map();
-    const repoFilter = repos.map((r) => `repo:^${r}$`).join(" OR ");
-    const queryStr = `${pattern} (${repoFilter}) count:100`;
-    const results = await this.search(queryStr);
-    return groupResultsByRepo(results);
+  ): Promise<RepoSearchResponse> {
+    if (repos.length === 0) return { matches: new Map(), truncated: false };
+
+    // Batch repos into alternation filters (repo:^(a|b|...)$) so N repos cost
+    // ceil(N / REPO_BATCH_SIZE) queries instead of one oversized query.
+    const all: SearchResult[] = [];
+    let truncated = false;
+    for (let i = 0; i < repos.length; i += REPO_BATCH_SIZE) {
+      const batch = repos.slice(i, i + REPO_BATCH_SIZE);
+      const alternation = batch.map(escapeRegex).join("|");
+      const queryStr = `${pattern} repo:^(${alternation})$ count:${RESULT_CAP}`;
+      const { results, truncated: batchTruncated } =
+        await this.search(queryStr);
+      all.push(...results);
+      truncated = truncated || batchTruncated;
+    }
+    return { matches: groupResultsByRepo(all), truncated };
   }
 
-  private async search(queryStr: string): Promise<SearchResult[]> {
+  private async search(
+    queryStr: string,
+  ): Promise<{ results: SearchResult[]; truncated: boolean }> {
     // Retry once after 5s on HTTP 5xx. Two consecutive 5xx = real outage.
     try {
       return await this.searchOnce(queryStr);
@@ -174,11 +208,14 @@ export class SourcegraphGraphQLClient implements SourcegraphSearchClient {
     }
   }
 
-  private async searchOnce(queryStr: string): Promise<SearchResult[]> {
+  private async searchOnce(
+    queryStr: string,
+  ): Promise<{ results: SearchResult[]; truncated: boolean }> {
     const graphqlQuery = `
       query Search($query: String!) {
         search(query: $query) {
           results {
+            limitHit
             results {
               ... on FileMatch {
                 repository { name }
@@ -213,7 +250,7 @@ export class SourcegraphGraphQLClient implements SourcegraphSearchClient {
     const json = (await response.json()) as {
       data?: {
         search?: {
-          results?: { results?: GraphQLSearchResult[] };
+          results?: { limitHit?: boolean; results?: GraphQLSearchResult[] };
         };
       };
       errors?: Array<{ message: string }>;
@@ -239,13 +276,19 @@ export class SourcegraphGraphQLClient implements SourcegraphSearchClient {
       }
     }
 
-    if (matches.length >= 100) {
+    // limitHit is Sourcegraph's authoritative truncation signal; the count
+    // comparison is a fallback for backends that omit it. count: caps
+    // line-level matches, so compare the flattened results, not FileMatch nodes.
+    const truncated =
+      json.data?.search?.results?.limitHit === true ||
+      results.length >= RESULT_CAP;
+    if (truncated) {
       console.error(
-        `[sourcegraph] Warning: result count hit cap (100) for query: ${queryStr} — results may be truncated`,
+        `[sourcegraph] Warning: result count hit cap (${RESULT_CAP}) for query: ${queryStr} — results may be truncated`,
       );
     }
 
-    return results;
+    return { results, truncated };
   }
 }
 
@@ -265,6 +308,16 @@ function buildMcpConfig(config: SourcegraphClientConfig) {
   };
 }
 
+const AgentSearchResultSchema = z.object({
+  repo: z.string(),
+  file: z.string(),
+  lineNumber: z.number(),
+  content: z.string(),
+  language: z.string(),
+});
+
+const AgentSearchResultsSchema = z.array(AgentSearchResultSchema);
+
 export class SourcegraphMCPClient implements SourcegraphSearchClient {
   private readonly config: SourcegraphClientConfig;
 
@@ -275,7 +328,7 @@ export class SourcegraphMCPClient implements SourcegraphSearchClient {
   async keywordSearch(
     pattern: string,
     language?: string | null,
-  ): Promise<RepoMatch[]> {
+  ): Promise<KeywordSearchResponse> {
     const languageFilter = language ? ` language:${language}` : "";
     const prompt = [
       `Use the keyword_search tool to search for the pattern: ${pattern}${languageFilter}`,
@@ -283,15 +336,14 @@ export class SourcegraphMCPClient implements SourcegraphSearchClient {
       "No explanation, just the JSON array.",
     ].join("\n");
 
-    return this.runAgent<RepoMatch[]>(prompt, (raw) =>
-      groupByRepo(raw as SearchResult[]),
-    );
+    const results = await this.runAgent(prompt);
+    return { matches: groupByRepo(results), truncated: false };
   }
 
   async searchInRepos(
     repos: string[],
     pattern: string,
-  ): Promise<Map<string, SearchResult[]>> {
+  ): Promise<RepoSearchResponse> {
     const repoFilter = repos.map((r) => `repo:${r}`).join(" OR ");
     const prompt = [
       `Use the keyword_search tool to search for: ${pattern} in repos matching (${repoFilter})`,
@@ -299,16 +351,16 @@ export class SourcegraphMCPClient implements SourcegraphSearchClient {
       "No explanation, just the JSON array.",
     ].join("\n");
 
-    const results = await this.runAgent<SearchResult[]>(prompt, (raw) =>
-      Array.isArray(raw) ? (raw as SearchResult[]) : [],
-    );
-    return groupResultsByRepo(results);
+    const results = await this.runAgent(prompt);
+    return { matches: groupResultsByRepo(results), truncated: false };
   }
 
-  private async runAgent<T>(
-    prompt: string,
-    transform: (raw: unknown) => T,
-  ): Promise<T> {
+  /**
+   * Run the agent and parse its final message as a validated search result
+   * array. Throws on any extraction, parse, or schema failure — a mumbled
+   * agent response must surface as an error, never as "no matches".
+   */
+  private async runAgent(prompt: string): Promise<SearchResult[]> {
     const conversation = query({
       prompt,
       options: {
@@ -332,7 +384,7 @@ export class SourcegraphMCPClient implements SourcegraphSearchClient {
       .find((m): m is SDKAssistantMessage => m.type === "assistant");
 
     if (!lastAssistant) {
-      return transform([]);
+      throw new Error("MCP agent produced no assistant message");
     }
 
     const content = lastAssistant.message.content;
@@ -343,16 +395,30 @@ export class SourcegraphMCPClient implements SourcegraphSearchClient {
           .join("")
       : String(content);
 
-    try {
-      const jsonMatch = text.match(/\[[\s\S]*\]/);
-      const parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
-      return transform(parsed);
-    } catch {
-      console.error(
-        "Failed to parse agent response as JSON:",
-        text.slice(0, 200),
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      throw new Error(
+        `MCP agent response contained no JSON array: ${text.slice(0, 200)}`,
       );
-      return transform([]);
     }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `MCP agent response is not valid JSON (${msg}): ${jsonMatch[0].slice(0, 200)}`,
+      );
+    }
+
+    const validated = AgentSearchResultsSchema.safeParse(parsed);
+    if (!validated.success) {
+      throw new Error(
+        `MCP agent response failed schema validation: ${validated.error.message}`,
+      );
+    }
+
+    return validated.data;
   }
 }

@@ -62,7 +62,12 @@ jobs:
           # or orchestration scripts. Always use the base branch versions of trust-boundary files.
           git fetch origin "$BASE_REF" --depth=1
           mkdir -p config
-          git show "origin/$BASE_REF:config/invariants.json" > config/invariants.json 2>/dev/null || echo '{"invariants": []}' > config/invariants.json
+          # Fail closed: an empty ruleset would pass everything, so a missing
+          # base-branch config is an infrastructure failure, not a pass.
+          if ! git show "origin/$BASE_REF:config/invariants.json" > config/invariants.json 2>/dev/null; then
+            echo "::error::config/invariants.json not found on base branch '$BASE_REF' — refusing to run with an empty ruleset"
+            exit 1
+          fi
           git show "origin/$BASE_REF:CLAUDE.md" > CLAUDE.md 2>/dev/null || true
           echo "Using trust-boundary files from base branch: $BASE_REF"
 
@@ -84,8 +89,12 @@ jobs:
           # Mask secrets so they cannot be printed in logs
           echo "::add-mask::$SRC_ACCESS_TOKEN"
           echo "::add-mask::$SOURCEGRAPH_URL"
-          # Run TS/GraphQL verifier; capture output even on failure (exit 1 = violations found)
-          npx tsx src/index.ts --mode=cli > report.json || true
+          # Run TS/GraphQL verifier; capture the real exit code without failing
+          # the step (0 = pass, 1 = violations, 2 = infrastructure error).
+          # The gate step below is authoritative on this code.
+          EC=0
+          npx tsx src/index.ts --mode=cli > report.json || EC=$?
+          echo "exit_code=$EC" >> "$GITHUB_OUTPUT"
 
       - name: Post or update PR comment
         if: always() && steps.verify.outcome != 'cancelled'
@@ -94,6 +103,11 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: |
+          if [[ ! -s report.json ]]; then
+            echo "report.json missing or empty — skipping PR comment"
+            exit 0
+          fi
+
           MARKER="<!-- invariant-check-bot -->"
 
           # Build comment body
@@ -113,15 +127,33 @@ jobs:
 
       - name: Fail on violations, errors, or incomplete results
         run: |
-          FAILED=$(jq -r '.summary.failed' report.json)
+          # The verifier exit code is the authoritative gate; the jq checks
+          # below are a completeness backstop only.
+          EC="${{ steps.verify.outputs.exit_code }}"
+          if [[ "$EC" == "1" ]]; then
+            FAILING=$(jq -r '[.results[]? | select(.status == "fail") | .id] | join(", ")' report.json 2>/dev/null || echo "unknown")
+            echo "::error::Invariant violation(s) found: ${FAILING:-unknown}"
+            exit 1
+          elif [[ "$EC" != "0" ]]; then
+            echo "::error::Sourcegraph unreachable / config error — not a rule violation (verifier exit code: ${EC:-none})"
+            exit 1
+          fi
           ERRORS=$(jq -r '.summary.errors // 0' report.json)
           CHECKED=$(jq -r '.summary.checked // .summary.total' report.json)
           TOTAL=$(jq -r '.summary.total' report.json)
-          if [[ "$FAILED" -gt 0 || "$ERRORS" -gt 0 ]]; then
-            echo "::error::$FAILED violation(s), $ERRORS error(s) found"
+          if [[ "$ERRORS" -gt 0 ]]; then
+            echo "::error::$ERRORS error(s) found despite exit code 0 (incomplete run)"
             exit 1
           fi
           if [[ "$CHECKED" -lt "$TOTAL" ]]; then
             echo "::error::Only $CHECKED of $TOTAL invariants were checked (incomplete run)"
+            exit 1
+          fi
+          # Canary backstop: every canary MUST fire (fail with >= 1 violation).
+          # A passing canary means search is silently broken — fail closed.
+          CANARY_TOTAL=$(jq -r '[.results[]? | select(.id | startswith("canary-"))] | length' report.json)
+          CANARY_FIRED=$(jq -r '[.results[]? | select(.id | startswith("canary-")) | select(.status == "fail" and (.violations | length) >= 1)] | length' report.json)
+          if [[ "$CANARY_TOTAL" -gt 0 && "$CANARY_FIRED" -lt "$CANARY_TOTAL" ]]; then
+            echo "::error::Canary invariant did not fire ($CANARY_FIRED of $CANARY_TOTAL) — Sourcegraph search may be silently broken, results untrustworthy"
             exit 1
           fi

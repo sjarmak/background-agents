@@ -16,9 +16,11 @@ startup in [`src/index.ts`](./src/index.ts):
 - **GraphQL (default)** — `SourcegraphGraphQLClient`, used whenever the `--mcp`
   flag is absent (`src/index.ts`: `process.argv.includes("--mcp") ? "mcp" : "graphql"`).
   It calls the Sourcegraph GraphQL API directly; no Claude agent or MCP server is
-  involved. This is the path CI runs.
+  involved. Both GitHub workflows (the PR check and the weekly scheduled run) run
+  this path.
 - **MCP (opt-in)** — `SourcegraphMCPClient`, enabled with the `--mcp` flag. It
   drives a Claude agent equipped with the Sourcegraph MCP tools listed below.
+  No workflow passes `--mcp`; this path is for manual runs only.
 
 The tool-driven verification instructions in this file apply to the **MCP path**.
 On the default GraphQL path the same invariant semantics run in code via the

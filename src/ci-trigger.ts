@@ -75,15 +75,17 @@ export function formatPRComment(report: VerificationReport): string {
   ];
 
   for (const r of results) {
-    const isCanary = r.id.startsWith("canary-");
-    const statusIcon = isCanary
+    // A canary is only "expected" when it actually fired (status fail);
+    // a passing or erroring canary is a broken pipeline and must show as such.
+    const canaryFired = r.id.startsWith("canary-") && r.status === "fail";
+    const statusIcon = canaryFired
       ? "🔵"
       : r.status === "pass"
         ? "✅"
         : r.status === "fail"
           ? "❌"
           : "⚠️";
-    const statusLabel = isCanary ? "expected" : r.status;
+    const statusLabel = canaryFired ? "expected" : r.status;
     lines.push(
       `| \`${r.id}\` | ${r.severity} | ${statusIcon} ${statusLabel} | ${r.violations.length} |`,
     );
@@ -111,37 +113,6 @@ export function formatPRComment(report: VerificationReport): string {
 }
 
 // ---------------------------------------------------------------------------
-// PR Comment posting
-// ---------------------------------------------------------------------------
-
-export async function postPRComment(payload: {
-  owner: string;
-  repo: string;
-  prNumber: number;
-  body: string;
-  token: string;
-}): Promise<void> {
-  const url = `https://api.github.com/repos/${payload.owner}/${payload.repo}/issues/${payload.prNumber}/comments`;
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${payload.token}`,
-      "Content-Type": "application/json",
-      Accept: "application/vnd.github.v3+json",
-    },
-    body: JSON.stringify({ body: payload.body }),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Failed to post PR comment: ${response.status} ${text}`);
-  }
-
-  console.error(`[ci] Posted comment to PR #${payload.prNumber}`);
-}
-
-// ---------------------------------------------------------------------------
 // Exit code logic
 // ---------------------------------------------------------------------------
 
@@ -152,5 +123,9 @@ export function exitCodeForReport(report: VerificationReport): number {
       !r.id.startsWith("canary") &&
       (r.severity === "critical" || r.severity === "high"),
   );
-  return hasBlocking ? 1 : 0;
+  if (hasBlocking) return 1;
+  // Per-invariant errors (truncation, search failures, dead canary) mean the
+  // run is incomplete — infrastructure failure, never a silent pass.
+  const hasErrors = report.results.some((r) => r.status === "error");
+  return hasErrors ? 2 : 0;
 }
