@@ -19,3 +19,12 @@ report.json
 .dolt/
 *.db
 .beads-credential-key
+
+# prd-build orchestration artifacts
+.prd-build/
+
+# Operator-local Claude notes (not shared)
+CLAUDE.local.md
+
+# CodeGraph local index
+.codegraph/
