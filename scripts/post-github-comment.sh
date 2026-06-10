@@ -24,6 +24,11 @@ fi
 REPO="${1:?Usage: $0 [--format-only] OWNER/REPO PR_NUMBER}"
 PR_NUMBER="${2:?Usage: $0 [--format-only] OWNER/REPO PR_NUMBER}"
 
+if ! command -v jq &>/dev/null; then
+  echo "Error: 'jq' is required but not found in PATH" >&2
+  exit 1
+fi
+
 if [[ "$FORMAT_ONLY" == "false" ]] && ! command -v gh &>/dev/null; then
   echo "Error: 'gh' CLI is required" >&2
   exit 1
@@ -59,6 +64,8 @@ while IFS=$'\t' read -r ID SEVERITY STATUS VIOLATION_COUNT; do
   esac
   COMMENT+="| \`$ID\` | $SEVERITY | $ICON $STATUS | $VIOLATION_COUNT |\n"
 done < <(echo "$REPORT" | jq -r '.results[] | [.id, .severity, .status, (.violations | length | tostring)] | @tsv')
+
+SUMMARY_PART="$COMMENT"
 
 # Add violation details if any
 if [[ "$FAILED" -gt 0 ]]; then
@@ -107,6 +114,16 @@ if [[ "$FAILED" -gt 0 ]]; then
 fi
 
 COMMENT+="\n---\n_Checked by Cross-Repo Invariant Verifier_"
+
+# GitHub caps comment bodies at 65536 chars — if oversized, keep header + summary
+# table and drop the violations section in favor of an overflow note
+MAX_BODY_CHARS=60000
+if [[ "${#COMMENT}" -gt "$MAX_BODY_CHARS" ]]; then
+  COMMENT="$SUMMARY_PART"
+  COMMENT+="\n### Violations\n\n"
+  COMMENT+="> :warning: Violation details omitted — the full comment would exceed GitHub's 65536-character limit. See the workflow run artifact for the complete violation list.\n"
+  COMMENT+="\n---\n_Checked by Cross-Repo Invariant Verifier_"
+fi
 
 if [[ "$FORMAT_ONLY" == "true" ]]; then
   # Output formatted markdown to stdout

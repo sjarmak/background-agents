@@ -33,13 +33,8 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code@1.0.33
-
-      - name: Setup Claude OAuth credentials
-        run: |
-          mkdir -p ~/.claude
-          echo '${{ secrets.CLAUDE_OAUTH_CREDENTIALS }}' > ~/.claude/.credentials.json
+      - name: Install dependencies
+        run: npm ci
 
       - name: Verify cross-repo invariants
         id: verify
@@ -50,14 +45,23 @@ jobs:
         run: |
           echo "::add-mask::$SRC_ACCESS_TOKEN"
           echo "::add-mask::$SOURCEGRAPH_URL"
-          chmod +x scripts/verify-invariants.sh
-          scripts/verify-invariants.sh -v -c "$CONFIG_FILE" > report.json || true
+          # Run TS/GraphQL verifier; capture the real exit code without failing
+          # the step (0 = pass, 1 = violations, 2 = infrastructure error) so
+          # Slack post and artifact upload still run. The gate step below is
+          # authoritative on this code.
+          EC=0
+          INVARIANTS_CONFIG="$CONFIG_FILE" npx tsx src/index.ts --mode=cli > report.json || EC=$?
+          echo "exit_code=$EC" >> "$GITHUB_OUTPUT"
 
       - name: Post to Slack
         if: always() && steps.verify.outcome != 'cancelled'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
+          if [[ ! -s report.json ]]; then
+            echo "report.json missing or empty — skipping Slack post"
+            exit 0
+          fi
           chmod +x scripts/post-slack.sh
           cat report.json | scripts/post-slack.sh
 
@@ -68,3 +72,36 @@ jobs:
           name: invariant-report-${{ github.run_id }}
           path: report.json
           retention-days: 30
+
+      - name: Fail on violations or infrastructure errors
+        run: |
+          # The verifier exit code is the authoritative gate; the jq checks
+          # below are a completeness backstop only (mirrors the PR gate).
+          EC="${{ steps.verify.outputs.exit_code }}"
+          if [[ "$EC" == "1" ]]; then
+            FAILING=$(jq -r '[.results[]? | select(.status == "fail") | .id] | join(", ")' report.json 2>/dev/null || echo "unknown")
+            echo "::error::Invariant violation(s) found: ${FAILING:-unknown}"
+            exit 1
+          elif [[ "$EC" != "0" ]]; then
+            echo "::error::Sourcegraph unreachable / config error — not a rule violation (verifier exit code: ${EC:-none})"
+            exit 1
+          fi
+          ERRORS=$(jq -r '.summary.errors // 0' report.json)
+          CHECKED=$(jq -r '.summary.checked // .summary.total' report.json)
+          TOTAL=$(jq -r '.summary.total' report.json)
+          if [[ "$ERRORS" -gt 0 ]]; then
+            echo "::error::$ERRORS error(s) found despite exit code 0 (incomplete run)"
+            exit 1
+          fi
+          if [[ "$CHECKED" -lt "$TOTAL" ]]; then
+            echo "::error::Only $CHECKED of $TOTAL invariants were checked (incomplete run)"
+            exit 1
+          fi
+          # Canary backstop: every canary MUST fire (fail with >= 1 violation).
+          # A passing canary means search is silently broken — fail closed.
+          CANARY_TOTAL=$(jq -r '[.results[]? | select(.id | startswith("canary-"))] | length' report.json)
+          CANARY_FIRED=$(jq -r '[.results[]? | select(.id | startswith("canary-")) | select(.status == "fail" and (.violations | length) >= 1)] | length' report.json)
+          if [[ "$CANARY_TOTAL" -gt 0 && "$CANARY_FIRED" -lt "$CANARY_TOTAL" ]]; then
+            echo "::error::Canary invariant did not fire ($CANARY_FIRED of $CANARY_TOTAL) — Sourcegraph search may be silently broken, results untrustworthy"
+            exit 1
+          fi

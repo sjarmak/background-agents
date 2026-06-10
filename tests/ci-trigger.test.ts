@@ -75,6 +75,30 @@ describe("exitCodeForReport", () => {
     ]);
     expect(exitCodeForReport(report)).toBe(1);
   });
+
+  it("returns 2 when an invariant errors (incomplete run)", () => {
+    const report = makeReport([
+      makeResult({ id: "a", severity: "critical", status: "error" }),
+      makeResult({ id: "b", severity: "high", status: "pass" }),
+    ]);
+    expect(exitCodeForReport(report)).toBe(2);
+  });
+
+  it("returns 2 when a canary errors", () => {
+    const report = makeReport([
+      makeResult({ id: "canary-check", severity: "low", status: "error" }),
+      makeResult({ id: "real", severity: "high", status: "pass" }),
+    ]);
+    expect(exitCodeForReport(report)).toBe(2);
+  });
+
+  it("prefers 1 over 2 when blocking violations and errors coexist", () => {
+    const report = makeReport([
+      makeResult({ id: "a", severity: "critical", status: "fail" }),
+      makeResult({ id: "b", severity: "high", status: "error" }),
+    ]);
+    expect(exitCodeForReport(report)).toBe(1);
+  });
 });
 
 describe("formatPRComment", () => {
@@ -143,6 +167,15 @@ describe("formatPRComment", () => {
     expect(out).toContain("`canary-synthetic`");
     expect(out).toContain("🔵 expected");
     expect(out).not.toContain("❌ fail | 1");
+  });
+
+  it("shows the real status for a canary that did not fire", () => {
+    const report = makeReport([
+      makeResult({ id: "canary-synthetic", severity: "low", status: "error" }),
+    ]);
+    const out = formatPRComment(report);
+    expect(out).toContain("| `canary-synthetic` | low | ⚠️ error | 0 |");
+    expect(out).not.toContain("expected");
   });
 });
 

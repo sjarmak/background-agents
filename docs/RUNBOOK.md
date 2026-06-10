@@ -10,13 +10,13 @@ The Cross-Repo Invariant Verifier is an automated system that checks organizatio
 GitHub Actions (cron / PR trigger)
         |
         v
-  Claude Code CLI
+  src/index.ts  (TypeScript verifier)
         |
         v
-  config/invariants.json  -->  Agent reads invariants
+  config/invariants.json  -->  InvariantEngine loads invariants
         |
         v
-  Sourcegraph MCP  -->  keyword_search / read_file / find_references
+  Sourcegraph GraphQL API  -->  keyword search + per-repo assertion searches
         |
         v
   report.json      -->  Violations written to artifact
@@ -26,6 +26,10 @@ GitHub Actions (cron / PR trigger)
   PR comment       -->  Inline results on PRs
 ```
 
+Both workflows run the GraphQL backend. The Claude-agent/MCP backend
+(`npx tsx src/index.ts --mode=cli --mcp`, configured by `config/mcp-config.json`
+and instructed by `CLAUDE.md`) is opt-in for manual runs only.
+
 ### Components
 
 | Component                | Location  | Purpose                       |
@@ -33,7 +37,7 @@ GitHub Actions (cron / PR trigger)
 | `config/invariants.json`        | repo `config/` | Invariant definitions         |
 | `config/invariants.schema.json` | repo `config/` | JSON Schema for validation    |
 | `config/mcp-config.json`        | repo `config/` | Sourcegraph MCP server config |
-| `CLAUDE.md`                     | repo root      | Agent instructions            |
+| `CLAUDE.md`                     | repo root      | Agent instructions (opt-in MCP path) + output contract |
 | `.github/workflows/`            | repo           | CI/CD triggers (cron + PR)    |
 | `scripts/`                      | repo           | Helper scripts for CI         |
 
@@ -42,7 +46,7 @@ GitHub Actions (cron / PR trigger)
 1. **Check GitHub Actions logs**
    - Go to the repository's Actions tab
    - Find the failed workflow run
-   - Read the Claude Code CLI output for error messages
+   - Read the verifier's stderr diagnostics in the step log for error messages
 
 2. **Read the report.json artifact**
    - Download the `report.json` artifact from the workflow run
@@ -54,6 +58,7 @@ GitHub Actions (cron / PR trigger)
    - The `canary-verification-active` invariant MUST always produce a violation
    - If the canary passed (zero violations), the pipeline is broken — treat the entire run as unreliable
    - Check Sourcegraph connectivity if the canary didn't fire
+   - The weekly Slack message is canary-aware: it stays green when the canary is the only failure (context line "Pipeline health: OK (canary fired)"), and turns red with a ":rotating_light: PIPELINE BROKEN: canary did not fire" line — regardless of other results — when the canary passes or is missing
 
 4. **Check Sourcegraph health**
    - Verify the Sourcegraph instance is reachable at `$SOURCEGRAPH_URL`
@@ -61,8 +66,8 @@ GitHub Actions (cron / PR trigger)
    - Look for recent Sourcegraph incidents or maintenance windows
 
 5. **Check API key validity**
-   - Verify Claude OAuth credentials are valid: check `CLAUDE_OAUTH_CREDENTIALS` secret contains a valid `claudeAiOauth` JSON with non-expired tokens
    - Verify `SRC_ACCESS_TOKEN` hasn't expired: test with a manual API call
+   - For manual `--mcp` runs only: verify Claude OAuth credentials are valid — `CLAUDE_OAUTH_CREDENTIALS` must contain a valid `claudeAiOauth` JSON with non-expired tokens (neither workflow uses this secret)
    - Check `SLACK_WEBHOOK_URL` is still active if Slack notifications are missing
 
 ## 3. Emergency Disable
@@ -90,7 +95,7 @@ Delete or rename the workflow file. This is the most aggressive option — use o
 
 | Secret                     | Stored In           | How to Rotate                                                                                                                                                                    |
 | -------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CLAUDE_OAUTH_CREDENTIALS` | GitHub repo secrets | JSON contents of `~/.claude/.credentials.json` with `claudeAiOauth` object (accessToken, refreshToken, expiresAt). Copy from a machine with an active Claude subscription login. |
+| `CLAUDE_OAUTH_CREDENTIALS` | GitHub repo secrets | Only needed for opt-in `--mcp` runs — neither workflow uses it. JSON contents of `~/.claude/.credentials.json` with `claudeAiOauth` object (accessToken, refreshToken, expiresAt). Copy from a machine with an active Claude subscription login. |
 | `SOURCEGRAPH_URL`          | GitHub repo secrets | Sourcegraph instance URL (e.g., `https://sourcegraph.sourcegraph.com`). Update if instance changes.                                                                              |
 | `SRC_ACCESS_TOKEN`         | GitHub repo secrets | Generate new token in Sourcegraph > User Settings > Access Tokens. Update in repo secrets.                                                                                       |
 | `SLACK_WEBHOOK_URL`        | GitHub repo secrets | Create new webhook in Slack > App Settings > Incoming Webhooks. Update in repo secrets. Delete old webhook.                                                                      |
@@ -127,6 +132,8 @@ After rotating any secret:
 | All invariants return zero results     | Sourcegraph token expired or endpoint unreachable                           | Rotate `SRC_ACCESS_TOKEN`; check endpoint URL                                                     |
 | Run times out                          | Too many search results or Sourcegraph is slow                              | Add language filters; reduce invariant count; check Sourcegraph performance                       |
 | `"status": "error"` in report          | API key invalid, network error, or schema validation failure                | Check CI logs for the specific error message; verify secrets                                      |
+| Invariant reports `status: "error"` with `search truncated at result cap; violations may be missed` | Search pattern matched the GraphQL result cap (500), so the result set is incomplete | Narrow the `search.pattern`; add a `language` filter                                              |
+| PR check fails with `config/invariants.json not found on base branch` | Base branch has no `config/invariants.json`; the trust boundary fails closed rather than running an empty ruleset | Restore `config/invariants.json` on the base branch                                               |
 | Slack notification missing             | Webhook URL invalid or Slack app deactivated                                | Test webhook manually with `curl`; regenerate if needed                                           |
 | Schema validation fails                | `config/invariants.json` doesn't match `config/invariants.schema.json`      | Run `ajv validate` locally; check for typos, missing required fields, or exceeding `maxItems: 20` |
 | Duplicate/stale violations             | Sourcegraph index is behind                                                 | Check indexing status; wait for re-index or trigger manually                                      |
