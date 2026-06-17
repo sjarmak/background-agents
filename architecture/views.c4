@@ -1,0 +1,160 @@
+// Views over the Cross-Repo Invariant Verifier model. Opt-in / superseded
+// (#evolving) elements stay solid but amber; the (currently empty) #planned
+// and #research lenses dim + dash anything proposed.
+
+views {
+
+  // Landscape — the whole system in context of its triggers, search
+  // substrate, and notification sinks.
+  view index {
+    title 'Invariant Verifier — system landscape'
+    include *
+
+    style * {
+      opacity 25%
+    }
+    style element.tag == #built, element.tag == #evolving {
+      opacity 100%
+    }
+    style element.tag == #evolving {
+      color amber
+    }
+    style element.tag == #planned {
+      color muted
+      border dashed
+    }
+    style element.tag == #research {
+      color indigo
+      border dashed
+    }
+  }
+
+  // The verifier system, decomposed into its containers.
+  view verifierSystem of verifier {
+    title 'Verifier — containers (Node CLI + config + CI harness)'
+    include *
+
+    style element.tag == #evolving {
+      color amber
+    }
+  }
+
+  // The Node verifier internals (src/).
+  view appContainer of verifier.app {
+    title 'Verifier (Node CLI, src/) — components'
+    include *
+
+    style element.tag == #evolving {
+      color amber
+    }
+  }
+
+  // The engine + its assertion / canary sub-components.
+  view engineView of verifier.app.engine {
+    title 'InvariantEngine — isolation, assertions, canary guard'
+    include *
+  }
+
+  // The CI harness internals (.github/ + scripts/).
+  view ciContainer of verifier.ci {
+    title 'CI harness — workflows, trust boundary, notify'
+    include *
+
+    style element.tag == #evolving {
+      color amber
+    }
+  }
+
+  // Risks & open questions — the #risk-flagged elements, each with the open
+  // question stated in-box, so a reviewer probes them rather than discovering
+  // them mid-meeting.
+  view risks {
+    title 'Risks & open questions'
+    include
+      verifier,
+      element.tag == #risk,
+      verifier.app,
+      verifier.ci
+
+    style * {
+      opacity 30%
+    }
+    style element.tag == #risk {
+      opacity 100%
+      color red
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Walkthrough flows (dynamic views) — the narrative spine of the review.
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Flow 1 — a PR check end-to-end.
+  dynamic view prCheckFlow {
+    title 'Walkthrough — PR invariant check'
+    description 'The trust boundary pins invariants.json + CLAUDE.md to the base branch FIRST, so a PR cannot weaken its own checks; the verifier exit code is the authoritative gate, and the bot comment is upserted in place (one per PR).'
+
+    prAuthor -> github 'open / update PR'
+    github.actions -> verifier.ci.prWorkflow 'pull_request event'
+    verifier.ci.prWorkflow -> verifier.ci.trustBoundary 'pin invariants + CLAUDE.md to base'
+    verifier.ci.prWorkflow -> verifier.app.entry 'tsc + vitest, then run verifier'
+    verifier.app.entry -> verifier.app.sgGraphqlClient 'pre-flight health check'
+    verifier.app.entry -> verifier.app.engine 'verifyAll'
+    verifier.app.engine -> verifier.app.sgGraphqlClient 'keyword + per-repo assertion searches'
+    verifier.app.sgGraphqlClient -> sourcegraph.sgGraphql 'POST .api/graphql'
+    verifier.app.entry -> verifier.ci.prWorkflow 'JSON report + exit 0/1/2'
+    verifier.ci.prWorkflow -> verifier.ci.commentUpsert 'format report'
+    verifier.ci.commentUpsert -> github.prComments 'upsert bot comment via marker'
+  }
+
+  // Flow 2 — one invariant verified (the engine's core loop).
+  dynamic view verifyOneFlow {
+    title 'Walkthrough — verifying one invariant'
+    description 'Each invariant runs in isolation. A search that hits the 500-result cap, or a canary that finds nothing, throws — surfacing as status:error so an incomplete run can never masquerade as a clean pass.'
+
+    verifier.app.engine.assertions -> verifier.config 'read invariant (Zod-validated)'
+    verifier.app.engine.assertions -> verifier.app.sgGraphqlClient 'keywordSearch(pattern, language)'
+    verifier.app.sgGraphqlClient -> sourcegraph.sgGraphql 'search count:500'
+    sourcegraph.sgGraphql -> verifier.app.sgGraphqlClient 'matches + limitHit'
+    verifier.app.engine.assertions -> verifier.app.sgGraphqlClient 'searchInRepos(repos, assertionPattern)'
+    verifier.app.engine.canaryGuard -> verifier.app.sgGraphqlClient 'canary-* with zero matches → throw (fail closed)'
+    verifier.app.engine.assertions -> verifier.app.ciTrigger 'violations → InvariantResult'
+  }
+
+  // Flow 3 — the opt-in MCP backend (manual runs only).
+  dynamic view mcpFlow {
+    title 'Walkthrough — opt-in MCP / agent backend'
+    description 'OPT-IN (--mcp), exercised by no workflow. A Claude agent calls the Sourcegraph MCP tools and returns a JSON array; a mumbled or unparseable response throws rather than reporting "no matches". Note it cannot detect truncation today.'
+
+    operator -> verifier.app.entry 'npx tsx src/index.ts --mcp'
+    verifier.app.entry -> verifier.app.sgMcpClient 'select MCP backend'
+    verifier.app.engine -> verifier.app.sgMcpClient 'keywordSearch / searchInRepos'
+    verifier.app.sgMcpClient -> models 'agent query (allowed MCP tools, maxTurns)'
+    models -> sourcegraph.sgMcp 'keyword_search / find_references / read_file'
+    sourcegraph.sgMcp -> models 'tool results'
+    models -> verifier.app.sgMcpClient 'final message → JSON array (Zod-validated)'
+  }
+
+  // Planned-only lens. Nothing is currently tagged #planned / #research in
+  // this repo — the model reflects shipped reality — so this view surfaces the
+  // opt-in / superseded (#evolving) edges instead, which is the real
+  // "not-the-default-path" set a reviewer cares about.
+  view planned {
+    title 'Opt-in & superseded paths'
+    include
+      verifier,
+      verifier.app.sgMcpClient,
+      verifier.ci.legacyRunner,
+      models,
+      sourcegraph.sgMcp,
+      verifier.app.engine
+
+    style * {
+      opacity 30%
+    }
+    style element.tag == #evolving {
+      opacity 100%
+      color amber
+    }
+  }
+}

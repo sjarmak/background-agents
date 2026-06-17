@@ -1,0 +1,208 @@
+// The Cross-Repo Invariant Verifier — a background agent that checks
+// organization-wide code invariants across every Sourcegraph-indexed repo.
+//
+// One TypeScript system (src/) wrapped by a GitHub Actions CI harness
+// (.github/ + scripts/). It is triggered by PR events and a weekly cron,
+// queries Sourcegraph (GraphQL by default, MCP opt-in), and emits a
+// strict-JSON violation report posted as a PR comment or to Slack.
+//
+// The reference-architecture shape this repo demonstrates:
+//   external trigger → verification → structured JSON verdict → idempotent notify
+//
+// Delivery-state tags (see spec.c4) keep the opt-in MCP path visually distinct
+// from the default GraphQL path that both workflows actually run. Every element
+// links to its source so a reviewer can jump from any box to the code.
+
+model {
+
+  prAuthor = actor 'PR author / engineer' {
+    description 'Opens PRs and reads the invariant-check comment; cannot weaken invariants in the same PR (trust boundary)'
+  }
+
+  operator = actor 'Operator' {
+    description 'Runs the verifier manually (npm run verify), triages failed CI runs, rotates secrets (docs/RUNBOOK.md)'
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // External systems — the trigger source, the search substrate, the
+  // notification sinks, and (MCP path only) the inference provider.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  github = externalSystem 'GitHub' {
+    description 'Hosts the repo, fires the triggers (PR events + weekly cron), and receives the verdict as a PR comment / check'
+
+    actions = externalSystem 'GitHub Actions' {
+      description 'Runs both workflows; provides the runner, secrets, and 30-day artifact store'
+    }
+    prComments = externalSystem 'PR comments API' {
+      description 'Target of the idempotent marker-upsert comment (repos/:owner/:repo/issues/...)'
+    }
+  }
+
+  sourcegraph = externalSystem 'Sourcegraph' {
+    description 'Fleet-wide code search across every indexed repository — the verification substrate'
+
+    sgGraphql = externalSystem 'Sourcegraph GraphQL API' {
+      description '.api/graphql — search() + currentUser health check; token auth. The default backend.'
+    }
+    sgMcp = externalSystem 'Sourcegraph MCP server' {
+      description '.api/mcp via mcp-remote — keyword_search / find_references / read_file tools. Opt-in backend.'
+    }
+  }
+
+  slack = externalSystem 'Slack' {
+    description 'Incoming webhook — destination for the weekly scheduled report'
+  }
+
+  models = externalSystem 'Anthropic models (Claude Agent SDK)' {
+    description 'Drives the MCP agent that calls Sourcegraph tools and returns a JSON result array — opt-in path only'
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // The verifier system.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  verifier = system 'Cross-Repo Invariant Verifier' {
+    description 'Loads declarative invariants, verifies them fleet-wide via Sourcegraph, emits a strict-JSON report, exit-code gated'
+    link ../README.md 'README — architecture & layout'
+    link ../CLAUDE.md 'Agent instructions + JSON output contract'
+
+    // ── The Node verifier (src/) ───────────────────────────────────────────
+    app = container 'Verifier (Node CLI)' {
+      description 'src/ — entrypoint → engine → Sourcegraph client → JSON report; modes cli/ci are behaviorally identical'
+      technology 'TypeScript / Node 22 (ESM, tsx)'
+      link ../src 'src/'
+
+      entry = component 'entrypoint + pre-flight' {
+        #built
+        description 'index.ts — resolves config (--config > INVARIANTS_CONFIG > default), selects backend, runs the GraphQL health check, prints report to stdout, exits 0/1/2'
+        link ../src/index.ts 'src/index.ts'
+      }
+
+      engine = component 'InvariantEngine' {
+        #built
+        description 'Loads + Zod-validates invariants, runs each with per-invariant isolation at bounded concurrency (4); one failure never blocks the others'
+        link ../src/invariant-engine.ts 'src/invariant-engine.ts'
+
+        assertions = component 'assertion handlers' {
+          #built
+          description 'must_contain / must_not_contain / must_not_exist at repo or file scope; truncated search throws (fail closed, never a silent pass)'
+          link ../src/invariant-engine.ts 'invariant-engine.ts'
+        }
+        canaryGuard = component 'canary guard' {
+          #built
+          description 'A canary-* invariant that finds zero matches throws — a dead canary means search is silently broken, not a clean org'
+          link ../src/invariant-engine.ts 'invariant-engine.ts'
+        }
+      }
+
+      sgGraphqlClient = component 'SourcegraphGraphQLClient' {
+        #built
+        description 'Direct GraphQL: keywordSearch + batched searchInRepos (repo:^(a|b)$ alternation, 20/batch), 500-result cap, retry-once on 5xx, limitHit truncation signal'
+        link ../src/sourcegraph-client.ts 'src/sourcegraph-client.ts'
+      }
+
+      sgMcpClient = component 'SourcegraphMCPClient' {
+        #evolving
+        #risk
+        description 'Opt-in (--mcp): drives a Claude agent over the Sourcegraph MCP tools, parses the final message as a Zod-validated result array. RISK: no workflow exercises it and it always reports truncated:false, so a capped MCP search passes silently'
+        link ../src/sourcegraph-client.ts 'src/sourcegraph-client.ts'
+      }
+
+      ciTrigger = component 'ci-trigger (verdict policy)' {
+        #built
+        description 'Detects GitHub context, formats the PR-comment markdown, and owns the exit-code policy (blocking fail=1, any error=2, canary rendered as "expected")'
+        link ../src/ci-trigger.ts 'src/ci-trigger.ts'
+      }
+    }
+
+    // ── Declarative invariant config (the rules being enforced) ────────────
+    config = datastore 'Invariant rules (config/)' {
+      #built
+      description 'invariants.json (max 20, JSON-Schema-validated) — id, severity, search pattern, assertion, message. The first canary-* rule must always fire.'
+      link ../config/invariants.json 'config/invariants.json'
+      link ../config/invariants.schema.json 'invariants.schema.json'
+    }
+
+    // ── The CI harness that triggers, gates, and notifies ──────────────────
+    ci = container 'CI harness (GitHub Actions + scripts)' {
+      description '.github/workflows/ + scripts/ — wraps the Node CLI with triggers, the trust boundary, the gate, and the notification sinks'
+      technology 'GitHub Actions YAML + Bash'
+      link ../.github/workflows 'workflows/'
+      link ../scripts 'scripts/'
+
+      prWorkflow = component 'PR check workflow' {
+        #built
+        description 'On PR to code paths: build-check (tsc + vitest) → pin trust-boundary files to base → run verifier → upsert PR comment → gate on exit code'
+        link ../.github/workflows/invariant-check-pr.yml 'invariant-check-pr.yml'
+      }
+      scheduledWorkflow = component 'scheduled workflow' {
+        #built
+        description 'Weekly cron (Mon 09:00 UTC) + manual dispatch: run verifier → post to Slack → upload 30-day artifact → gate on exit code'
+        link ../.github/workflows/invariant-check-scheduled.yml 'invariant-check-scheduled.yml'
+      }
+      trustBoundary = component 'trust-boundary pinning' {
+        #built
+        #risk
+        description 'PR workflow reads invariants.json + CLAUDE.md from the base branch so a PR cannot weaken its own checks; fails closed if base config is missing. RISK: only these two files are pinned — config/mcp-config.json and the scripts/ are not'
+        link ../.github/workflows/invariant-check-pr.yml 'pin step'
+      }
+      commentUpsert = component 'PR comment upsert' {
+        #built
+        description 'post-github-comment.sh — formats the report and idempotently patches the prior bot comment located by an HTML marker (one comment per PR)'
+        link ../scripts/post-github-comment.sh 'post-github-comment.sh'
+      }
+      slackPost = component 'Slack poster' {
+        #built
+        description 'post-slack.sh — turns the report JSON into a webhook payload for the weekly run'
+        link ../scripts/post-slack.sh 'post-slack.sh'
+      }
+      legacyRunner = component 'legacy Claude-CLI runner' {
+        #evolving
+        description 'verify-invariants.sh — original shell orchestrator driving claude -p over MCP; superseded by the Node CLI and no longer invoked by either workflow'
+        link ../scripts/verify-invariants.sh 'verify-invariants.sh'
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Relationships.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Triggers in
+  github.actions -> verifier.ci 'fires PR check + weekly cron'
+  prAuthor -> github 'opens PR'
+  operator -> verifier.app 'manual run: npm run verify'
+
+  // CI harness drives the Node app and the sinks
+  verifier.ci.prWorkflow -> verifier.app 'tsc + vitest, then run verifier'
+  verifier.ci.scheduledWorkflow -> verifier.app 'run verifier (INVARIANTS_CONFIG)'
+  verifier.ci.prWorkflow -> verifier.ci.trustBoundary 'pin trusted files to base branch'
+  verifier.ci.prWorkflow -> verifier.ci.commentUpsert 'format + upsert comment'
+  verifier.ci.scheduledWorkflow -> verifier.ci.slackPost 'post weekly report'
+  verifier.ci.commentUpsert -> github.prComments 'PATCH / create bot comment'
+  verifier.ci.slackPost -> slack 'webhook payload'
+  verifier.ci.scheduledWorkflow -> github.actions 'upload report.json artifact (30d)'
+
+  // Inside the Node app
+  verifier.app.entry -> verifier.app.engine 'load + verifyAll'
+  verifier.app.entry -> verifier.app.sgGraphqlClient 'pre-flight healthCheck (exit 2 on fail)'
+  verifier.app.entry -> verifier.app.ciTrigger 'exitCodeForReport'
+  verifier.app.engine -> verifier.config 'load + Zod-validate invariants'
+  verifier.app.engine -> verifier.app.sgGraphqlClient 'keywordSearch / searchInRepos (default)'
+  verifier.app.engine -> verifier.app.sgMcpClient 'same interface (--mcp opt-in)' {
+    #evolving
+  }
+
+  // Out to external systems
+  verifier.app.sgGraphqlClient -> sourcegraph.sgGraphql 'POST .api/graphql (token auth)'
+  verifier.app.sgMcpClient -> models 'agent query (Claude Agent SDK)' {
+    #evolving
+  }
+  models -> sourcegraph.sgMcp 'keyword_search / find_references / read_file' {
+    #evolving
+  }
+  verifier.ci.legacyRunner -> sourcegraph.sgMcp 'claude -p over MCP (legacy, unused by CI)' {
+    #evolving
+  }
+}

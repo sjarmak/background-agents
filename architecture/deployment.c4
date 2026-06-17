@@ -1,0 +1,65 @@
+// Deployment model — where each piece runs at review time.
+//
+// The verifier is stateless: it has no server, no database, no long-lived
+// process. It runs as an ephemeral Node process on a GitHub Actions runner
+// (or a developer laptop), talks to Sourcegraph over HTTPS, and writes a
+// single report.json. This is the "what runs where / what's the process &
+// data boundary" view a design review always asks for.
+
+deployment {
+
+  ghHost = host 'GitHub Actions runner' {
+    description 'Ephemeral ubuntu-latest runner — the production execution environment for both workflows'
+
+    verifierProc = proc 'Node process — npx tsx src/index.ts' {
+      instanceOf verifier.app
+    }
+    ciProc = proc 'Workflow steps + Bash helpers' {
+      instanceOf verifier.ci
+    }
+    reportArtifact = proc 'report.json' {
+      description 'The strict-JSON verdict — to stdout, then PR comment / Slack / 30-day artifact'
+    }
+  }
+
+  devHost = host 'Developer laptop' {
+    description 'Manual runs — npm run verify, or the opt-in --mcp backend'
+    instanceOf verifier.app
+  }
+
+  githubHost = host 'GitHub' {
+    description 'Repo, trigger source (PR events + cron), PR-comment + artifact sink'
+    instanceOf github
+  }
+
+  sourcegraphHost = host 'Sourcegraph instance' {
+    description 'Fleet-wide indexed code search — reached over HTTPS (GraphQL / MCP)'
+    instanceOf sourcegraph
+  }
+
+  slackHost = host 'Slack' {
+    description 'Incoming-webhook endpoint for the weekly report'
+    instanceOf slack
+  }
+
+  anthropicHost = host 'Anthropic API' {
+    description 'Drives the MCP agent — opt-in path only'
+    instanceOf models
+  }
+
+  // Runtime data & control flow between processes/hosts.
+  ciProc -> verifierProc 'spawns the verifier'
+  verifierProc -> reportArtifact 'writes JSON verdict'
+  verifierProc -> sourcegraphHost 'search over HTTPS (token auth)'
+  ciProc -> githubHost 'upsert PR comment + upload artifact'
+  ciProc -> slackHost 'post weekly report'
+  verifierProc -> anthropicHost 'agent query (--mcp only)'
+}
+
+views {
+
+  deployment view deployment {
+    title 'Deployment — where each piece runs'
+    include *
+  }
+}
