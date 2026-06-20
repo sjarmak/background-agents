@@ -5,7 +5,9 @@ export default defineConfig({
     include: ["tests/**/*.test.ts"],
     coverage: {
       provider: "v8",
-      include: ["src/ci-trigger.ts"],
+      include: ["src/**/*.ts"],
+      // index.ts is the process-level entrypoint (argv/env parsing, process.exit) — exercised by tests/e2e-verify.sh, not unit tests.
+      exclude: ["src/index.ts"],
       reporter: ["text", "json-summary"],
       thresholds: {
         lines: 80,

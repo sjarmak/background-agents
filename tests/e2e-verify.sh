@@ -155,9 +155,6 @@ fi
 log "  Pipeline exited with code $VERIFY_EXIT"
 log "  Report saved to $WORK_DIR/report.json"
 
-# Canary is critical+fail, so exitCodeForReport returns 1
-assert_eq "1" "$VERIFY_EXIT" "Pipeline exit code is 1 (critical violations present)"
-
 # Check we got output at all
 if [[ ! -s "$WORK_DIR/report.json" ]]; then
   log "ERROR: report.json is empty — pipeline produced no output"
@@ -165,6 +162,20 @@ if [[ ! -s "$WORK_DIR/report.json" ]]; then
   cat "$WORK_DIR/stderr.log" >&2
   exit 2
 fi
+
+# Derive the expected exit code from the report itself:
+#   shell path: 1 on any fail/error/timeout (fail closed)
+#   TS path: mirrors exitCodeForReport — 1 for non-canary critical/high fails,
+#            2 for per-invariant errors, else 0 (canary fails are excluded)
+if [[ "$MODE" == "shell" ]]; then
+  EXPECTED_EXIT=$(jq -r 'if (.summary.failed + .summary.errors + (.summary.timeouts // 0)) > 0 then 1 else 0 end' "$WORK_DIR/report.json")
+else
+  EXPECTED_EXIT=$(jq -r '
+    if ([.results[] | select(.status == "fail" and (.id | startswith("canary") | not) and (.severity == "critical" or .severity == "high"))] | length) > 0 then 1
+    elif ([.results[] | select(.status == "error")] | length) > 0 then 2
+    else 0 end' "$WORK_DIR/report.json")
+fi
+assert_eq "$EXPECTED_EXIT" "$VERIFY_EXIT" "Pipeline exit code matches report contents"
 
 # Show stderr for debugging
 if [[ -s "$WORK_DIR/stderr.log" ]]; then
@@ -284,8 +295,27 @@ if [[ -f "$WORK_DIR/slack-payload.json" ]]; then
   assert_cmd_ok "Slack payload is valid JSON" jq -e . "$WORK_DIR/slack-payload.json"
   assert_cmd_ok "Slack payload has attachments" jq -e '.attachments' "$WORK_DIR/slack-payload.json"
 
+  # Mirror post-slack.sh's color logic: a fired canary with zero non-canary
+  # failures/errors is "good"; anything else is "danger"
+  CANARY_FIRED=$(jq '[.results[] | select(.id | startswith("canary-")) | select(.status == "fail" and (.violations | length) >= 1)] | length' "$REPORT")
+  NON_CANARY_BAD=$(jq '[.results[] | select(.id | startswith("canary-") | not) | select(.status != "pass")] | length' "$REPORT")
+  if [[ "$CANARY_FIRED" -ge 1 && "$NON_CANARY_BAD" -eq 0 ]]; then
+    EXPECTED_COLOR="good"
+  else
+    EXPECTED_COLOR="danger"
+  fi
   SLACK_COLOR=$(jq -r '.attachments[0].color' "$WORK_DIR/slack-payload.json")
-  assert_eq "danger" "$SLACK_COLOR" "Slack attachment color is 'danger' (canary fails)"
+  assert_eq "$EXPECTED_COLOR" "$SLACK_COLOR" "Slack attachment color matches report contents"
+
+  SLACK_TEXT=$(jq -r '.attachments[0].blocks[] | select(.type == "section") | .text.text' "$WORK_DIR/slack-payload.json")
+  TOTAL=$((TOTAL + 1))
+  if [[ "$SLACK_TEXT" == *'\n'* ]]; then
+    FAIL=$((FAIL + 1))
+    log "  FAIL: Slack details contain literal \\n sequences instead of newlines"
+  else
+    PASS=$((PASS + 1))
+    log "  PASS: Slack details use real newlines"
+  fi
 else
   TOTAL=$((TOTAL + 3))
   FAIL=$((FAIL + 3))

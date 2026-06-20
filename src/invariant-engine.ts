@@ -81,6 +81,12 @@ export interface VerificationReport {
 // Engine
 // ---------------------------------------------------------------------------
 
+const CONCURRENCY_LIMIT = 4;
+const TRUNCATION_ERROR =
+  "search truncated at result cap; violations may be missed";
+const CANARY_ERROR =
+  "canary invariant found zero matches — Sourcegraph search may be broken";
+
 export class InvariantEngine {
   constructor(private readonly sg: SourcegraphSearchClient) {}
 
@@ -96,73 +102,87 @@ export class InvariantEngine {
   /**
    * Verify all invariants with per-invariant isolation (from Parent B).
    * Each invariant runs independently — one failure doesn't block others.
+   * Runs with bounded concurrency; results keep config-file order.
    * Returns B's JSON report contract.
    */
   async verifyAll(config: InvariantsConfig): Promise<VerificationReport> {
-    const results: InvariantResult[] = [];
-    let passed = 0;
-    let failed = 0;
-    let errors = 0;
+    const results: InvariantResult[] = new Array(config.invariants.length);
+    let nextIndex = 0;
 
-    for (const invariant of config.invariants) {
-      console.error(
-        `[engine] Checking: ${invariant.id} (${invariant.severity})`,
-      );
-
-      try {
-        const violations = await this.verifyOne(invariant);
-        const status = violations.length > 0 ? "fail" : "pass";
-
-        if (status === "pass") passed++;
-        else failed++;
-
-        results.push({
-          id: invariant.id,
-          description: invariant.description,
-          severity: invariant.severity,
-          status,
-          message: invariant.message,
-          violations,
-        });
-
-        console.error(`  -> ${status} (${violations.length} violations)`);
-      } catch (err) {
-        errors++;
-        const errorMsg = err instanceof Error ? err.message : "unknown error";
-        console.error(`  -> error: ${errorMsg}`);
-
-        results.push({
-          id: invariant.id,
-          description: invariant.description,
-          severity: invariant.severity,
-          status: "error",
-          message: invariant.message,
-          violations: [],
-          error: errorMsg,
-        });
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const index = nextIndex++;
+        if (index >= config.invariants.length) return;
+        results[index] = await this.verifyIsolated(config.invariants[index]);
       }
-    }
+    };
+
+    const poolSize = Math.min(CONCURRENCY_LIMIT, config.invariants.length);
+    await Promise.all(Array.from({ length: poolSize }, () => worker()));
 
     return {
       timestamp: new Date().toISOString(),
       summary: {
         total: config.invariants.length,
-        passed,
-        failed,
-        errors,
+        passed: results.filter((r) => r.status === "pass").length,
+        failed: results.filter((r) => r.status === "fail").length,
+        errors: results.filter((r) => r.status === "error").length,
       },
       results,
     };
+  }
+
+  private async verifyIsolated(invariant: Invariant): Promise<InvariantResult> {
+    console.error(`[engine] Checking: ${invariant.id} (${invariant.severity})`);
+
+    try {
+      const violations = await this.verifyOne(invariant);
+      // Canary invariants are synthetic probes that MUST fire — zero matches
+      // means the search path is silently broken, not a clean org (fail closed).
+      if (invariant.id.startsWith("canary-") && violations.length === 0) {
+        throw new Error(CANARY_ERROR);
+      }
+      const status = violations.length > 0 ? "fail" : "pass";
+      console.error(
+        `  -> ${invariant.id}: ${status} (${violations.length} violations)`,
+      );
+
+      return {
+        id: invariant.id,
+        description: invariant.description,
+        severity: invariant.severity,
+        status,
+        message: invariant.message,
+        violations,
+      };
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "unknown error";
+      console.error(`  -> ${invariant.id}: error: ${errorMsg}`);
+
+      return {
+        id: invariant.id,
+        description: invariant.description,
+        severity: invariant.severity,
+        status: "error",
+        message: invariant.message,
+        violations: [],
+        error: errorMsg,
+      };
+    }
   }
 
   /**
    * Verify a single invariant. Returns violations (empty array = pass).
    */
   async verifyOne(invariant: Invariant): Promise<Violation[]> {
-    const matches = await this.sg.keywordSearch(
+    const { matches, truncated } = await this.sg.keywordSearch(
       invariant.search.pattern,
       invariant.search.language,
     );
+
+    if (truncated) {
+      throw new Error(TRUNCATION_ERROR);
+    }
 
     if (matches.length === 0) {
       return []; // No matches: must_not_exist passes, others have nothing to check
@@ -205,10 +225,12 @@ export class InvariantEngine {
     if (!assertionPattern) return [];
 
     const repos = [...new Set(matches.map((m) => m.repo))];
-    const assertionMatches = await this.sg.searchInRepos(
-      repos,
-      assertionPattern,
-    );
+    const { matches: assertionMatches, truncated } =
+      await this.sg.searchInRepos(repos, assertionPattern);
+
+    if (truncated) {
+      throw new Error(TRUNCATION_ERROR);
+    }
 
     const violations: Violation[] = [];
 
@@ -253,10 +275,12 @@ export class InvariantEngine {
     if (!assertionPattern) return [];
 
     const repos = [...new Set(matches.map((m) => m.repo))];
-    const assertionMatches = await this.sg.searchInRepos(
-      repos,
-      assertionPattern,
-    );
+    const { matches: assertionMatches, truncated } =
+      await this.sg.searchInRepos(repos, assertionPattern);
+
+    if (truncated) {
+      throw new Error(TRUNCATION_ERROR);
+    }
 
     const violations: Violation[] = [];
 

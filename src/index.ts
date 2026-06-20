@@ -1,9 +1,13 @@
 /**
  * Main entry point for the Cross-Repo Invariant Verifier.
  *
- * Two modes:
- *   --mode=cli   One-shot verification, prints JSON report to stdout, exits
- *   --mode=ci    CI mode — detects GitHub Actions context, posts PR comment
+ * Two modes, accepted for compatibility but behaviorally identical:
+ *   --mode=cli   One-shot verification (local runs, `npm run verify`)
+ *   --mode=ci    Same verification under GitHub Actions
+ *
+ * Both print the JSON report to stdout and exit per exitCodeForReport()
+ * (0 = clean, 1 = blocking violations, 2 = infrastructure failure). PR
+ * comment posting lives in the PR workflow's marker-upsert step, not here.
  *
  * Server mode (Slack Bolt bot) removed — scheduled Slack output uses
  * B's curl-to-webhook approach via post-slack.sh in the GitHub Action.
@@ -14,12 +18,8 @@ import {
   SourcegraphMCPClient,
 } from "./sourcegraph-client.js";
 import { InvariantEngine } from "./invariant-engine.js";
-import {
-  detectCIContext,
-  formatPRComment,
-  postPRComment,
-  exitCodeForReport,
-} from "./ci-trigger.js";
+import { exitCodeForReport } from "./ci-trigger.js";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -42,8 +42,15 @@ function loadAppConfig(): AppConfig {
   );
   const backend = process.argv.includes("--mcp") ? "mcp" : "graphql";
   const configPath = resolve(
-    process.env.INVARIANTS_CONFIG ?? "config/invariants.json",
+    process.argv.find((a) => a.startsWith("--config="))?.split("=")[1] ??
+      process.env.INVARIANTS_CONFIG ??
+      "config/invariants.json",
   );
+
+  if (!existsSync(configPath)) {
+    console.error(`[verifier] Invariants config file not found: ${configPath}`);
+    process.exit(2);
+  }
 
   return {
     mode,
@@ -108,57 +115,11 @@ async function main(): Promise<void> {
   const invariants = await engine.loadConfig(config.configPath);
   console.error(`[verifier] Loaded ${invariants.invariants.length} invariants`);
 
-  switch (config.mode) {
-    case "cli":
-      await runCLI(engine, invariants);
-      break;
-    case "ci":
-      await runCI(engine, invariants);
-      break;
-  }
-}
+  const report = await engine.verifyAll(invariants);
 
-// ---------------------------------------------------------------------------
-// Mode: CLI — outputs B's JSON report contract to stdout
-// ---------------------------------------------------------------------------
-
-async function runCLI(
-  engine: InvariantEngine,
-  config: Awaited<ReturnType<InvariantEngine["loadConfig"]>>,
-): Promise<void> {
-  const report = await engine.verifyAll(config);
-
-  // JSON to stdout (consumable by post-slack.sh, post-github-comment.sh)
+  // JSON to stdout (consumable by post-slack.sh and the PR workflow's
+  // marker-upsert comment step) — identical in cli and ci modes.
   console.log(JSON.stringify(report, null, 2));
-
-  process.exit(exitCodeForReport(report));
-}
-
-// ---------------------------------------------------------------------------
-// Mode: CI — posts PR comment, outputs JSON
-// ---------------------------------------------------------------------------
-
-async function runCI(
-  engine: InvariantEngine,
-  config: Awaited<ReturnType<InvariantEngine["loadConfig"]>>,
-): Promise<void> {
-  const ci = detectCIContext();
-  const report = await engine.verifyAll(config);
-
-  // Always write JSON to stdout
-  console.log(JSON.stringify(report, null, 2));
-
-  // Post PR comment if we have the context
-  if (ci.triggerType === "pr" && ci.prNumber && ci.repo && ci.githubToken) {
-    const [owner, repo] = ci.repo.split("/");
-    await postPRComment({
-      owner,
-      repo,
-      prNumber: ci.prNumber,
-      body: formatPRComment(report),
-      token: ci.githubToken,
-    });
-  }
 
   process.exit(exitCodeForReport(report));
 }
