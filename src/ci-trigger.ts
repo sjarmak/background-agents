@@ -120,7 +120,7 @@ export function exitCodeForReport(report: VerificationReport): number {
   const hasBlocking = report.results.some(
     (r) =>
       r.status === "fail" &&
-      !r.id.startsWith("canary") &&
+      !r.id.startsWith("canary-") &&
       (r.severity === "critical" || r.severity === "high"),
   );
   if (hasBlocking) return 1;

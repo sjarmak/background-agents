@@ -68,6 +68,17 @@ describe("exitCodeForReport", () => {
     expect(exitCodeForReport(report)).toBe(0);
   });
 
+  it("blocks a real critical invariant whose id starts with 'canary' but not 'canary-'", () => {
+    // Regression: the engine and formatPRComment treat only the `canary-*`
+    // convention as synthetic probes; exitCodeForReport must agree. An id like
+    // "canary_search" (no dash) is a real invariant — a critical failure there
+    // must block (exit 1), not be silently exempted.
+    const report = makeReport([
+      makeResult({ id: "canary_search", severity: "critical", status: "fail" }),
+    ]);
+    expect(exitCodeForReport(report)).toBe(1);
+  });
+
   it("still blocks when canary passes but other critical fails", () => {
     const report = makeReport([
       makeResult({ id: "canary-check", severity: "critical", status: "fail" }),
